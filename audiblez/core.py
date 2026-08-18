@@ -321,19 +321,41 @@ def strfdelta(tdelta, fmt='{D:02}d {H:02}h {M:02}m {S:02}s'):
     return f.format(fmt, **values)
 
 
+def find_aac_encoder():
+    """Pick the best AAC encoder this ffmpeg actually has.
+
+    libfdk_aac is non-free, so most distribution builds (including Homebrew's default) leave it
+    out; hardcoding it makes the concat step fail and no m4b is ever produced.
+    """
+    try:
+        encoders = subprocess.run(['ffmpeg', '-hide_banner', '-encoders'],
+                                  capture_output=True, text=True, check=True).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return 'aac'
+    for encoder in ('libfdk_aac', 'aac_at', 'aac'):
+        if re.search(rf'^\s*\S+\s+{re.escape(encoder)}\s', encoders, re.MULTILINE):
+            return encoder
+    return 'aac'
+
+
 def concat_wavs_with_ffmpeg(chapter_files, output_folder, filename):
     wav_list_txt = Path(output_folder) / filename.replace('.epub', '_wav_list.txt')
     with open(wav_list_txt, 'w') as f:
         for wav_file in chapter_files:
             f.write(f"file '{wav_file}'\n")
     concat_file_path = Path(output_folder) / filename.replace('.epub', '.tmp.mp4')
-    subprocess.run([
+    encoder = find_aac_encoder()
+    print(f'Concatenating {len(chapter_files)} chapters with ffmpeg using the {encoder} encoder...')
+    proc = subprocess.run([
         'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', wav_list_txt,
         # '-c', 'copy',
-        '-c:a',  'libfdk_aac',
+        '-c:a',  encoder,
         '-b:a',  '192k',
         concat_file_path])
     Path(wav_list_txt).unlink()
+    if proc.returncode != 0 or not Path(concat_file_path).exists():
+        raise RuntimeError(f'ffmpeg failed to concatenate the chapter files (exit {proc.returncode}). '
+                           'The .wav chapter files are still on disk.')
     return concat_file_path
 
 
