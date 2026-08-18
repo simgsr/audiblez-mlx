@@ -113,7 +113,34 @@ By default, audiblez runs on CPU. If you pass the option `--cuda` it will try to
 
 Check out this example: [Audiblez running on a Google Colab Notebook with Cuda ](https://colab.research.google.com/drive/164PQLowogprWQpRjKk33e-8IORAvqXKI?usp=sharing]).
 
-We don't currently support Apple Silicon, as there is not yet a Kokoro implementation in MLX. As soon as it will be available, we will support it.
+## How to run on Apple Silicon (MLX)
+
+On Apple Silicon, Kokoro can run through [MLX](https://github.com/Blaizzy/mlx-audio) instead of Torch.
+It uses the same model and the same voices, but is considerably faster — measured at
+**906 vs 238 characters/second** on an M5 Max, a 3.8x speed-up, which took a 15.7-hour audiobook
+from 87 minutes down to around 20.
+
+```
+pip install "audiblez[mlx]"
+```
+
+Once installed it is used automatically. Pick an engine explicitly with `--backend`:
+
+```
+audiblez book.epub -v af_sky --backend mlx     # force MLX (Apple Silicon only)
+audiblez book.epub -v af_sky --backend torch   # force Torch
+audiblez book.epub -v af_sky --backend auto    # default: MLX when available, else Torch
+```
+
+The MLX build runs in `bf16` where Torch runs `fp32`. Output is equivalent in duration
+(within 0.25%) and loudness, but not sample-identical — small timing differences accumulate
+across a chapter. Use `--backend torch` if you prefer the original.
+
+You can also point either backend at a different model repo, for example a quantized one:
+
+```
+audiblez book.epub -v af_sky --repo-id mlx-community/Kokoro-82M-8bit
+```
 
 ## Manually pick chapters to convert
 

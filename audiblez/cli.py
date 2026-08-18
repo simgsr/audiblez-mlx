@@ -21,6 +21,13 @@ def cli_main():
     parser.add_argument('-s', '--speed', default=1.0, help=f'Set speed from 0.5 to 2.0', type=float)
     parser.add_argument('-c', '--cuda', default=False, help=f'Use GPU via Cuda in Torch if available', action='store_true')
     parser.add_argument('-o', '--output', default='.', help='Output folder for the audiobook and temporary files', metavar='FOLDER')
+    parser.add_argument('-b', '--backend', default='auto', choices=['auto', 'torch', 'mlx'],
+                        help='TTS engine: mlx is Apple-Silicon only and faster, auto picks it when available')
+    parser.add_argument('--lang', default=None, metavar='CODE',
+                        help='Kokoro language code (a, b, e, f, h, i, j, p, z). Defaults to the first letter '
+                             'of the voice name; set it when using a custom .pt voice')
+    parser.add_argument('--repo-id', default=None, metavar='REPO',
+                        help='Hugging Face model repo to use instead of the backend default')
 
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
@@ -35,8 +42,9 @@ def cli_main():
         else:
             print('CUDA GPU not available. Defaulting to CPU')
 
-    from core import main
-    main(args.epub_file_path, args.voice, args.pick, args.speed, args.output)
+    from audiblez.core import main
+    main(args.epub_file_path, args.voice, args.pick, args.speed, args.output,
+         backend=args.backend, lang_code=args.lang, repo_id=args.repo_id)
 
 
 if __name__ == '__main__':

@@ -23,11 +23,17 @@ from tabulate import tabulate
 from pathlib import Path
 from string import Formatter
 from bs4 import BeautifulSoup, CData, Comment, Declaration, Doctype, NavigableString, ProcessingInstruction
-from kokoro import KPipeline
 from ebooklib import epub
 from pick import pick
 
+from audiblez.backends import get_pipeline, resolve_backend
+
 sample_rate = 24000
+
+
+def safe_filename_part(value):
+    """Voices may be a .pt path or a comma-blended list; neither is safe in a filename."""
+    return re.sub(r'[^\w.-]+', '_', str(value)).strip('_')
 
 
 def load_spacy():
@@ -70,7 +76,8 @@ def set_espeak_library():
 
 
 def main(file_path, voice, pick_manually, speed, output_folder='.',
-         max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None):
+         max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
+         backend='auto', lang_code=None, repo_id=None):
     if post_event: post_event('CORE_STARTED')
     load_spacy()
     if output_folder != '.':
@@ -114,15 +121,19 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
     print(f'Estimated time remaining (assuming {stats.chars_per_sec} chars/sec): {eta}')
     set_espeak_library()
-    pipeline = KPipeline(lang_code=voice[0])  # a for american or b for british etc.
+    lang_code = lang_code or voice[0]  # a for american or b for british etc.
+    resolved_backend = resolve_backend(backend)
+    print(f'Using the {resolved_backend} backend.')
+    pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id)
 
     chapter_wav_files = []
     chapter_titles = {}
+    voice_file_part = safe_filename_part(voice)
     for i, chapter in enumerate(selected_chapters, start=1):
         if max_chapters and i > max_chapters: break
         text = chapter.extracted_text
         xhtml_file_name = chapter.get_name().replace(' ', '_').replace('/', '_').replace('\\', '_')
-        chapter_wav_path = Path(output_folder) / filename.replace(extension, f'_chapter_{i}_{voice}_{xhtml_file_name}.wav')
+        chapter_wav_path = Path(output_folder) / filename.replace(extension, f'_chapter_{i}_{voice_file_part}_{xhtml_file_name}.wav')
         chapter_wav_files.append(chapter_wav_path)
         chapter_titles[str(chapter_wav_path)] = getattr(chapter, 'title', '') or f'Chapter {i}'
         if Path(chapter_wav_path).exists():
@@ -141,7 +152,8 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
         start_time = time.time()
         if post_event: post_event('CORE_CHAPTER_STARTED', chapter_index=chapter.chapter_index)
         audio_segments = gen_audio_segments(
-            pipeline, text, voice, speed, stats, post_event=post_event, max_sentences=max_sentences)
+            pipeline, text, voice, speed, stats, post_event=post_event, max_sentences=max_sentences,
+            lang_code=lang_code)
         if audio_segments:
             final_audio = np.concatenate(audio_segments)
             soundfile.write(chapter_wav_path, final_audio, sample_rate)
@@ -207,12 +219,13 @@ def split_long_sentence(text, max_length=400):
     return parts
 
 
-def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None):
+def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None,
+                       lang_code=None):
     nlp = spacy.load('xx_ent_wiki_sm')
     nlp.add_pipe('sentencizer')
     audio_segments = []
     doc = nlp(text)
-    lang_code = voice[0]
+    lang_code = lang_code or voice[0]
 
     if lang_code in 'ab':
         sentences = [s.text for s in doc.sents]
@@ -241,11 +254,13 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
     return audio_segments
 
 
-def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False):
-    lang_code = voice[:1]
-    pipeline = KPipeline(lang_code=lang_code, repo_id='hexgrad/Kokoro-82M')
+def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False,
+             backend='auto', lang_code=None, repo_id=None):
+    lang_code = lang_code or voice[:1]
+    set_espeak_library()
+    pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id)
     load_spacy()
-    audio_segments = gen_audio_segments(pipeline, text, voice=voice, speed=speed);
+    audio_segments = gen_audio_segments(pipeline, text, voice=voice, speed=speed, lang_code=lang_code)
     final_audio = np.concatenate(audio_segments)
     soundfile.write(output_file, final_audio, sample_rate)
     if play:
