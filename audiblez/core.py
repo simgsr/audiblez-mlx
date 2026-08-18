@@ -254,7 +254,10 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
     doc = nlp(text)
     lang_code = lang_code or voice[0]
 
-    if lang_code in 'ab':
+    # Tuple membership, not `in 'ab'`: the substring form also matched '' and 'ab', so a
+    # missing language code silently took the English path and skipped the long-sentence
+    # split that every other language depends on.
+    if lang_code in ('a', 'b'):
         sentences = [s.text for s in doc.sents]
     else:
         # For non-english languages, Kokoro truncates long sentences, so we split them manually
