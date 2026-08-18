@@ -7,7 +7,6 @@ import os
 import traceback
 from glob import glob
 
-import torch.cuda
 import spacy
 import ebooklib
 import soundfile
@@ -26,7 +25,7 @@ from bs4 import BeautifulSoup, CData, Comment, Declaration, Doctype, NavigableSt
 from ebooklib import epub
 from pick import pick
 
-from audiblez.backends import get_pipeline, resolve_backend
+from audiblez.backends import get_pipeline, initial_chars_per_sec, resolve_backend
 
 sample_rate = 24000
 
@@ -111,10 +110,15 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     if not has_ffmpeg:
         print('\033[91m' + 'ffmpeg not found. Please install ffmpeg to create mp3 and m4b audiobook files.' + '\033[0m')
 
+    resolved_backend = resolve_backend(backend)
     stats = SimpleNamespace(
         total_chars=sum(map(len, texts)),
         processed_chars=0,
-        chars_per_sec=500 if torch.cuda.is_available() else 50)
+        # Only characters actually sent to the model, which is what the rate must be based on:
+        # chapters skipped because their .wav already exists cost no time.
+        synthesized_chars=0,
+        chars_per_sec=initial_chars_per_sec(backend),
+        start_time=time.time())
     print('Started at:', time.strftime('%H:%M:%S'))
     print(f'Total characters: {stats.total_chars:,}')
     print('Total words:', len(' '.join(texts).split()))
@@ -122,7 +126,6 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     print(f'Estimated time remaining (assuming {stats.chars_per_sec} chars/sec): {eta}')
     set_espeak_library()
     lang_code = lang_code or voice[0]  # a for american or b for british etc.
-    resolved_backend = resolve_backend(backend)
     print(f'Using the {resolved_backend} backend.')
     pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id)
 
@@ -219,6 +222,30 @@ def split_long_sentence(text, max_length=400):
     return parts
 
 
+# Below these thresholds the measured rate is too noisy (model warm-up, first short sentence)
+# to be worth trusting over the seed guess.
+MIN_CHARS_TO_MEASURE = 2000
+MIN_SECONDS_TO_MEASURE = 5
+
+
+def measured_chars_per_sec(stats):
+    """Real throughput so far, falling back to the seed guess until there is enough data.
+
+    The old estimate was a fixed constant picked from whether CUDA was present, which on
+    Apple Silicon meant every run advertised the 50 chars/sec CPU figure -- a 15 hour
+    audiobook that actually took 87 minutes was announced as nearly five hours.
+
+    Rate is measured on synthesized characters only. Resuming a run credits already-written
+    chapters to processed_chars instantly, and dividing those by elapsed time would report a
+    wildly inflated rate that the cumulative average would never recover from.
+    """
+    elapsed = time.time() - getattr(stats, 'start_time', time.time())
+    synthesized = getattr(stats, 'synthesized_chars', stats.processed_chars)
+    if synthesized < MIN_CHARS_TO_MEASURE or elapsed < MIN_SECONDS_TO_MEASURE:
+        return stats.chars_per_sec
+    return synthesized / elapsed
+
+
 def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None,
                        lang_code=None):
     nlp = spacy.load('xx_ent_wiki_sm')
@@ -246,7 +273,9 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
             audio_segments.append(audio)
         if stats:
             stats.processed_chars += len(sent_text)
+            stats.synthesized_chars = getattr(stats, 'synthesized_chars', 0) + len(sent_text)
             stats.progress = stats.processed_chars * 100 // stats.total_chars
+            stats.chars_per_sec = measured_chars_per_sec(stats)
             stats.eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
             if post_event: post_event('CORE_PROGRESS', stats=stats)
             print(f'Estimated time remaining: {stats.eta}')

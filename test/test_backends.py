@@ -65,6 +65,52 @@ class ResolveBackendTest(unittest.TestCase):
             self.assertFalse(mlx_available())
 
 
+class AutoBackendFallbackTest(unittest.TestCase):
+    def test_auto_uses_torch_when_only_torch_is_installed(self):
+        with mock.patch.object(backends, 'mlx_available', return_value=False), \
+             mock.patch.object(backends, 'torch_available', return_value=True):
+            self.assertEqual(resolve_backend('auto'), 'torch')
+
+    def test_auto_names_mlx_on_apple_silicon_when_nothing_is_installed(self):
+        # The error should point at the backend that suits the machine, not the other one.
+        with mock.patch.object(backends, 'mlx_available', return_value=False), \
+             mock.patch.object(backends, 'torch_available', return_value=False), \
+             mock.patch.object(backends, 'is_apple_silicon', return_value=True):
+            self.assertEqual(resolve_backend('auto'), 'mlx')
+
+    def test_auto_names_torch_elsewhere_when_nothing_is_installed(self):
+        with mock.patch.object(backends, 'mlx_available', return_value=False), \
+             mock.patch.object(backends, 'torch_available', return_value=False), \
+             mock.patch.object(backends, 'is_apple_silicon', return_value=False):
+            self.assertEqual(resolve_backend('auto'), 'torch')
+
+    def test_torch_backend_without_kokoro_explains_the_extra(self):
+        with mock.patch.object(backends, 'torch_available', return_value=False):
+            with self.assertRaises(RuntimeError) as ctx:
+                get_pipeline('af_sky', backend='torch')
+        self.assertIn('.[torch]', str(ctx.exception))
+
+    def test_mlx_requested_off_apple_silicon_says_so(self):
+        with mock.patch.object(backends, 'mlx_available', return_value=False), \
+             mock.patch.object(backends, 'is_apple_silicon', return_value=False):
+            with self.assertRaises(RuntimeError) as ctx:
+                get_pipeline('af_sky', backend='mlx')
+        self.assertIn('Apple Silicon', str(ctx.exception))
+
+
+class InitialChoresPerSecTest(unittest.TestCase):
+    def test_mlx_seed_is_the_measured_figure(self):
+        with mock.patch.object(backends, 'resolve_backend', return_value='mlx'):
+            self.assertEqual(backends.initial_chars_per_sec('auto'),
+                             backends.CHARS_PER_SEC_GUESS['mlx'])
+
+    def test_torch_without_cuda_uses_the_cpu_seed(self):
+        with mock.patch.object(backends, 'resolve_backend', return_value='torch'), \
+             mock.patch.dict(sys.modules, {'torch': None}):
+            self.assertEqual(backends.initial_chars_per_sec('torch'),
+                             backends.CHARS_PER_SEC_GUESS['torch_cpu'])
+
+
 class MlxAdapterTest(unittest.TestCase):
     def build(self, lang_code='a', repo_id=None):
         model = FakeMlxModel()
@@ -101,10 +147,11 @@ class MlxAdapterTest(unittest.TestCase):
 
 class GetPipelineTest(unittest.TestCase):
     def test_mlx_requested_but_unavailable_raises_actionable_error(self):
-        with mock.patch.object(backends, 'mlx_available', return_value=False):
+        with mock.patch.object(backends, 'mlx_available', return_value=False), \
+             mock.patch.object(backends, 'is_apple_silicon', return_value=True):
             with self.assertRaises(RuntimeError) as ctx:
                 get_pipeline('af_sky', backend='mlx')
-        self.assertIn('audiblez[mlx]', str(ctx.exception))
+        self.assertIn('pip install mlx-audio', str(ctx.exception))
 
     def test_lang_code_defaults_to_first_letter_of_voice(self):
         with mock.patch.object(backends, 'mlx_available', return_value=True):
@@ -122,6 +169,43 @@ class GetPipelineTest(unittest.TestCase):
                  mock.patch.object(backends, 'set_espeak_data_path', return_value='/data'):
                 pipeline = get_pipeline('/voices/custom.pt', lang_code='b', backend='mlx')
         self.assertEqual(pipeline.lang_code, 'b')
+
+
+class MeasuredEtaTest(unittest.TestCase):
+    def stats(self, processed, elapsed, seed=900):
+        import time
+        from types import SimpleNamespace
+        return SimpleNamespace(processed_chars=processed, chars_per_sec=seed,
+                               start_time=time.time() - elapsed, total_chars=100000)
+
+    def test_keeps_the_seed_until_there_is_enough_data(self):
+        from audiblez.core import measured_chars_per_sec
+        self.assertEqual(measured_chars_per_sec(self.stats(processed=100, elapsed=60)), 900)
+        self.assertEqual(measured_chars_per_sec(self.stats(processed=50000, elapsed=1)), 900)
+
+    def test_switches_to_real_throughput(self):
+        from audiblez.core import measured_chars_per_sec
+        rate = measured_chars_per_sec(self.stats(processed=20000, elapsed=100))
+        self.assertAlmostEqual(rate, 200, delta=5)
+
+    def test_missing_start_time_does_not_explode(self):
+        from types import SimpleNamespace
+        from audiblez.core import measured_chars_per_sec
+        stats = SimpleNamespace(processed_chars=50000, chars_per_sec=900, total_chars=100000)
+        self.assertEqual(measured_chars_per_sec(stats), 900)
+
+    def test_resumed_chapters_do_not_inflate_the_rate(self):
+        # Re-running a half-finished book credits existing chapters to processed_chars
+        # instantly; only characters actually synthesized may drive the rate.
+        import time
+        from types import SimpleNamespace
+        from audiblez.core import measured_chars_per_sec
+        stats = SimpleNamespace(processed_chars=800000, synthesized_chars=0,
+                                chars_per_sec=900, total_chars=850000,
+                                start_time=time.time() - 20)
+        self.assertEqual(measured_chars_per_sec(stats), 900)
+        stats.synthesized_chars = 4000
+        self.assertAlmostEqual(measured_chars_per_sec(stats), 200, delta=5)
 
 
 class SafeFilenameTest(unittest.TestCase):

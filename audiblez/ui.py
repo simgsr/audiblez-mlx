@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 # A simple wxWidgets UI for audiblez
 
-import torch.cuda
 import numpy as np
 import soundfile
 import threading
@@ -17,7 +16,7 @@ from PIL import Image
 from tempfile import NamedTemporaryFile
 from pathlib import Path
 
-from audiblez.backends import mlx_available, resolve_backend
+from audiblez.backends import mlx_available, resolve_backend, torch_available
 from audiblez.voices import voices, flags
 
 EVENTS = {
@@ -53,7 +52,6 @@ class MainWindow(wx.Frame):
         self.create_layout()
         self.Centre()
         self.Show(True)
-        if Path('../epub/lewis.epub').exists(): self.open_epub('../epub/lewis.epub')
 
     def create_menu(self):
         menubar = wx.MenuBar()
@@ -274,7 +272,8 @@ class MainWindow(wx.Frame):
         # Backend: which TTS engine runs. MLX is Apple Silicon only and much faster.
         backend_label = wx.StaticText(panel, label="Backend:")
         self.selected_backend = 'auto'
-        backend_choices = ['auto', 'torch'] + (['mlx'] if mlx_available() else [])
+        backend_choices = ['auto'] + (['mlx'] if mlx_available() else []) + \
+                          (['torch'] if torch_available() else [])
         backend_dropdown = wx.ComboBox(panel, choices=backend_choices, value='auto', style=wx.CB_READONLY)
         backend_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_backend)
         sizer.Add(backend_label, pos=(0, 0), flag=wx.ALL, border=border)
@@ -296,19 +295,21 @@ class MainWindow(wx.Frame):
         engine_radio_panel = self.device_panel = wx.Panel(panel)
         cpu_radio = wx.RadioButton(engine_radio_panel, label="CPU", style=wx.RB_GROUP)
         cuda_radio = self.cuda_radio = wx.RadioButton(engine_radio_panel, label="CUDA")
-        if torch.cuda.is_available():
-            cuda_radio.SetValue(True)
-        else:
-            cpu_radio.SetValue(True)
-            cuda_radio.Disable()  # no CUDA on this machine; the radio was misleading
+        cpu_radio.SetValue(True)
+        cuda_radio.Disable()
+        if torch_available():
+            import torch
+            if torch.cuda.is_available():
+                cuda_radio.Enable()
+                cuda_radio.SetValue(True)
+            cpu_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cpu'))
+            cuda_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cuda'))
         sizer.Add(self.device_label, pos=(2, 0), flag=wx.ALL, border=border)
         sizer.Add(engine_radio_panel, pos=(2, 1), flag=wx.ALL, border=border)
         engine_radio_panel_sizer = wx.BoxSizer(wx.HORIZONTAL)
         engine_radio_panel.SetSizer(engine_radio_panel_sizer)
         engine_radio_panel_sizer.Add(cpu_radio, 0, wx.ALL, 5)
         engine_radio_panel_sizer.Add(cuda_radio, 0, wx.ALL, 5)
-        cpu_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cpu'))
-        cuda_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cuda'))
         self.update_device_row()
 
         # Create a list of voices with flags
@@ -404,7 +405,7 @@ class MainWindow(wx.Frame):
 
     def update_device_row(self):
         """The torch device radio is meaningless when MLX will actually run."""
-        uses_torch = resolve_backend(self.selected_backend) == 'torch'
+        uses_torch = resolve_backend(self.selected_backend) == 'torch' and torch_available()
         self.device_label.Enable(uses_torch)
         self.device_panel.Enable(uses_torch)
 

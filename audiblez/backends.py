@@ -20,13 +20,38 @@ DEFAULT_REPOS = {
     'mlx': 'mlx-community/Kokoro-82M-bf16',
 }
 
+# Starting guesses for the time estimate, in characters of text per second. These only seed
+# the estimate: it is recalibrated from real throughput once synthesis is under way.
+CHARS_PER_SEC_GUESS = {
+    'mlx': 900,        # measured ~906 on an M5 Max
+    'torch_cuda': 500,
+    'torch_cpu': 50,
+}
+
+
+def is_apple_silicon():
+    return platform.system() == 'Darwin' and platform.machine() == 'arm64'
+
 
 def mlx_available():
     """True when this machine can run the MLX backend."""
-    if platform.system() != 'Darwin' or platform.machine() != 'arm64':
+    if not is_apple_silicon():
         return False
     try:
         import mlx_audio  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def torch_available():
+    """True when the fallback torch backend is installed.
+
+    This fork installs MLX by default; torch and kokoro are an optional extra, so their
+    absence is normal rather than an error.
+    """
+    try:
+        import kokoro  # noqa: F401
     except ImportError:
         return False
     return True
@@ -38,7 +63,25 @@ def resolve_backend(backend='auto'):
         raise ValueError(f"Unknown backend {backend!r}. Choose one of: {', '.join(BACKENDS)}")
     if backend != 'auto':
         return backend
-    return 'mlx' if mlx_available() else 'torch'
+    if mlx_available():
+        return 'mlx'
+    if torch_available():
+        return 'torch'
+    # Nothing installed: name the one that suits this machine so the error tells the truth.
+    return 'mlx' if is_apple_silicon() else 'torch'
+
+
+def initial_chars_per_sec(backend):
+    """Seed value for the time estimate, before real throughput is known."""
+    if resolve_backend(backend) == 'mlx':
+        return CHARS_PER_SEC_GUESS['mlx']
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return CHARS_PER_SEC_GUESS['torch_cuda']
+    except ImportError:
+        pass
+    return CHARS_PER_SEC_GUESS['torch_cpu']
 
 
 def find_espeak_data_path():
@@ -117,9 +160,13 @@ def get_pipeline(voice, lang_code=None, backend='auto', repo_id=None):
     lang_code = lang_code or voice[0]
     if resolved == 'mlx':
         if not mlx_available():
-            raise RuntimeError(
-                'The mlx backend needs Apple Silicon and mlx-audio. '
-                'Install it with: pip install "audiblez[mlx]"')
+            hint = ('Install it with: pip install mlx-audio "misaki[en]"' if is_apple_silicon()
+                    else 'It needs Apple Silicon; use --backend torch on this machine.')
+            raise RuntimeError(f'The mlx backend is not available. {hint}')
         return MlxKokoroPipeline(lang_code, repo_id)
+    if not torch_available():
+        raise RuntimeError(
+            'The torch backend is not installed. This build ships MLX by default; '
+            'add the fallback with: pip install ".[torch]"')
     from kokoro import KPipeline
     return KPipeline(lang_code=lang_code, repo_id=repo_id or DEFAULT_REPOS['torch'])
