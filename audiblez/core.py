@@ -25,6 +25,7 @@ from bs4 import BeautifulSoup, CData, Comment, Declaration, Doctype, NavigableSt
 from ebooklib import epub
 from pick import pick
 
+from audiblez import DEFAULT_OUTPUT_FOLDER
 from audiblez.backends import get_pipeline, initial_chars_per_sec, resolve_backend
 
 sample_rate = 24000
@@ -74,13 +75,12 @@ def set_espeak_library():
         print("On Linux: sudo apt install espeak-ng")
 
 
-def main(file_path, voice, pick_manually, speed, output_folder='.',
+def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FOLDER,
          max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
          backend='auto', lang_code=None, repo_id=None):
     if post_event: post_event('CORE_STARTED')
     load_spacy()
-    if output_folder != '.':
-        Path(output_folder).mkdir(parents=True, exist_ok=True)
+    Path(output_folder).mkdir(parents=True, exist_ok=True)
 
     filename = Path(file_path).name
 
@@ -716,7 +716,11 @@ def concat_wavs_with_ffmpeg(chapter_files, output_folder, filename):
     wav_list_txt = Path(output_folder) / filename.replace('.epub', '_wav_list.txt')
     with open(wav_list_txt, 'w') as f:
         for wav_file in chapter_files:
-            f.write(f"file '{wav_file}'\n")
+            # Absolute: ffmpeg's concat demuxer resolves relative entries against the list
+            # file's own directory, so a relative output folder would be applied twice.
+            # A literal ' is escaped by closing, escaping, and reopening the quote.
+            path = str(Path(wav_file).resolve()).replace("'", r"'\''")
+            f.write(f"file '{path}'\n")
     concat_file_path = Path(output_folder) / filename.replace('.epub', '.tmp.mp4')
     encoder = find_aac_encoder()
     print(f'Concatenating {len(chapter_files)} chapters with ffmpeg using the {encoder} encoder...')

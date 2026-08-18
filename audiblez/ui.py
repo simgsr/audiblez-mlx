@@ -16,6 +16,7 @@ from PIL import Image
 from tempfile import NamedTemporaryFile
 from pathlib import Path
 
+from audiblez import DEFAULT_OUTPUT_FOLDER
 from audiblez.backends import mlx_available, resolve_backend, torch_available
 from audiblez.voices import voices, flags
 
@@ -342,7 +343,9 @@ class MainWindow(wx.Frame):
 
         # Add file dialog selector to select output folder
         output_folder_label = wx.StaticText(panel, label="Output Folder:")
-        self.output_folder_text_ctrl = wx.TextCtrl(panel, value=os.path.abspath('.'))
+        default_output = os.path.abspath(DEFAULT_OUTPUT_FOLDER)
+        os.makedirs(default_output, exist_ok=True)
+        self.output_folder_text_ctrl = wx.TextCtrl(panel, value=default_output)
         self.output_folder_text_ctrl.SetEditable(False)
         # self.output_folder_text_ctrl.SetMinSize((200, -1))
         output_folder_button = wx.Button(panel, label="📂 Select")

@@ -71,10 +71,31 @@ Then you can convert an .epub directly with:
 audiblez book.epub -v af_sky
 ```
 
-It will first create a bunch of `book_chapter_1.wav`, `book_chapter_2.wav`, etc. files in the same directory,
-and at the end it will produce a `book.m4b` file with the whole book you can listen with VLC or any
-audiobook player.
-It will only produce the `.m4b` file if you have `ffmpeg` installed on your machine.
+Everything is written to an **`audiobooks/`** folder, created if missing. Point it elsewhere
+with `-o`:
+
+```
+audiblez book.epub -v af_sky -o ~/Audiobooks
+```
+
+It first creates one `.wav` per chapter, then produces the `book.m4b` you can play in VLC or
+any audiobook player. The `.m4b` is only produced if `ffmpeg` is installed.
+
+### What you can delete afterwards
+
+Once the `.m4b` exists, **everything else in the folder is disposable**. The `.m4b` already
+contains the audio, the cover art as an embedded image stream, and the chapter marks in its
+metadata:
+
+| Leftover | Still needed? |
+|---|---|
+| `*.wav` (one per chapter) | No — but keeping them lets a re-run skip re-synthesizing, which is useful if you want to change the cover or chapter titles and re-mux |
+| `cover` | No — already embedded in the `.m4b` |
+| `chapters.txt` | No — already written into the `.m4b` metadata |
+
+The wavs are by far the largest artifact: a 15-hour audiobook produces roughly 2.5 GB of
+them against a 490 MB `.m4b`. `audiobooks/` is git-ignored apart from its `.gitkeep`, so none
+of it can be committed by accident.
 
 ## How to run the GUI
 
@@ -214,7 +235,8 @@ options:
   -c, --cuda            Use an Nvidia GPU via Torch. Ignored on Apple Silicon,
                         where the mlx backend already runs on the GPU
   -o FOLDER, --output FOLDER
-                        Output folder for the audiobook and temporary files
+                        Output folder for the audiobook and intermediate files
+                        (default: audiobooks/, created if missing)
   -b {auto,torch,mlx}, --backend {auto,torch,mlx}
                         TTS engine: mlx is Apple-Silicon only and faster, auto
                         picks it when available

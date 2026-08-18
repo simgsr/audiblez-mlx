@@ -14,3 +14,10 @@ chapters.txt
 dist
 .venv
 *.m4b
+
+# Generated audiobooks: keep the folder, ignore everything produced in it
+audiobooks/*
+!audiobooks/.gitkeep
+
+# ffmpeg intermediates left next to the output
+cover

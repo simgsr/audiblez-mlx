@@ -208,6 +208,48 @@ class MeasuredEtaTest(unittest.TestCase):
         self.assertAlmostEqual(measured_chars_per_sec(stats), 200, delta=5)
 
 
+class ConcatListTest(unittest.TestCase):
+    """The ffmpeg concat list resolves relative entries against its own directory."""
+
+    def build_list(self, tmpdir, names):
+        import os
+        from pathlib import Path
+        from audiblez.core import concat_wavs_with_ffmpeg
+        from unittest import mock
+        out = Path(tmpdir) / 'audiobooks'
+        out.mkdir()
+        files = []
+        for n in names:
+            p = out / n
+            p.write_bytes(b'')
+            files.append(p)
+        written = {}
+
+        def fake_run(cmd, *a, **k):
+            list_path = [c for c in cmd if str(c).endswith('_wav_list.txt')][0]
+            written['content'] = Path(list_path).read_text()
+            Path(cmd[-1]).write_bytes(b'x')  # pretend ffmpeg produced the concat file
+            return mock.Mock(returncode=0)
+
+        with mock.patch('audiblez.core.subprocess.run', side_effect=fake_run), \
+             mock.patch('audiblez.core.find_aac_encoder', return_value='aac'):
+            concat_wavs_with_ffmpeg(files, str(out), 'book.epub')
+        return written['content']
+
+    def test_entries_are_absolute(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            content = self.build_list(tmp, ['a.wav', 'b.wav'])
+        for line in content.strip().splitlines():
+            self.assertRegex(line, r"^file '/", f'relative entry would be resolved twice: {line}')
+
+    def test_single_quotes_are_escaped(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            content = self.build_list(tmp, ["it's.wav"])
+        self.assertIn(r"'\''", content)
+
+
 class SafeFilenameTest(unittest.TestCase):
     def test_blended_voice_is_safe(self):
         self.assertEqual(safe_filename_part('af_heart,af_bella'), 'af_heart_af_bella')

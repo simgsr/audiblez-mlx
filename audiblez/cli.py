@@ -2,6 +2,7 @@
 import argparse
 import sys
 
+from audiblez import DEFAULT_OUTPUT_FOLDER
 from audiblez.voices import voices, available_voices_str
 
 
@@ -22,7 +23,9 @@ def cli_main():
     parser.add_argument('-c', '--cuda', default=False, action='store_true',
                         help='Use an Nvidia GPU via Torch. Ignored on Apple Silicon, where the '
                              'mlx backend already runs on the GPU')
-    parser.add_argument('-o', '--output', default='.', help='Output folder for the audiobook and temporary files', metavar='FOLDER')
+    parser.add_argument('-o', '--output', default=DEFAULT_OUTPUT_FOLDER, metavar='FOLDER',
+                        help=f'Output folder for the audiobook and intermediate files '
+                             f'(default: {DEFAULT_OUTPUT_FOLDER}/, created if missing)')
     parser.add_argument('-b', '--backend', default='auto', choices=['auto', 'torch', 'mlx'],
                         help='TTS engine: mlx is Apple-Silicon only and faster, auto picks it when available')
     parser.add_argument('--lang', default=None, metavar='CODE',
