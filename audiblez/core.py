@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from tabulate import tabulate
 from pathlib import Path
 from string import Formatter
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, CData, Comment, Declaration, Doctype, NavigableString, ProcessingInstruction
 from kokoro import KPipeline
 from ebooklib import epub
 from pick import pick
@@ -117,12 +117,14 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     pipeline = KPipeline(lang_code=voice[0])  # a for american or b for british etc.
 
     chapter_wav_files = []
+    chapter_titles = {}
     for i, chapter in enumerate(selected_chapters, start=1):
         if max_chapters and i > max_chapters: break
         text = chapter.extracted_text
         xhtml_file_name = chapter.get_name().replace(' ', '_').replace('/', '_').replace('\\', '_')
         chapter_wav_path = Path(output_folder) / filename.replace(extension, f'_chapter_{i}_{voice}_{xhtml_file_name}.wav')
         chapter_wav_files.append(chapter_wav_path)
+        chapter_titles[str(chapter_wav_path)] = getattr(chapter, 'title', '') or f'Chapter {i}'
         if Path(chapter_wav_path).exists():
             print(f'File for chapter {i} already exists. Skipping')
             stats.processed_chars += len(text)
@@ -154,7 +156,7 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
             chapter_wav_files.remove(chapter_wav_path)
 
     if has_ffmpeg:
-        create_index_file(title, creator, chapter_wav_files, output_folder)
+        create_index_file(title, creator, chapter_wav_files, output_folder, chapter_titles)
         create_m4b(chapter_wav_files, filename, cover_image, output_folder)
         if post_event: post_event('CORE_FINISHED')
 
@@ -250,21 +252,342 @@ def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False
         subprocess.run(['ffplay', '-autoexit', '-nodisp', output_file])
 
 
+# Tags that never hold narratable prose.
+NON_CONTENT_TAGS = ['script', 'style', 'svg', 'nav', 'audio', 'video', 'head']
+
+# epub:type / ARIA role values marking page markers, navigation and notes.
+SKIP_EPUB_TYPES = {
+    'pagebreak', 'page-list', 'noteref', 'note', 'footnote', 'footnotes', 'endnote', 'endnotes',
+    'rearnote', 'rearnotes', 'annoref', 'toc', 'landmarks', 'index', 'glossary', 'colophon',
+}
+SKIP_ROLES = {
+    'doc-pagebreak', 'doc-noteref', 'doc-footnote', 'doc-endnote', 'doc-endnotes',
+    'doc-index', 'doc-toc', 'doc-glossary', 'navigation',
+}
+
+# class/id values publishers use for the little page numbers sprinkled through the text.
+PAGE_MARKER_RE = re.compile(r'^(?:page[-_]?(?:num(?:ber)?s?|break)?|pagenum|pageno|folio)[-_]?\d*$', re.I)
+# A page number is a couple of digits; anything longer under such a class is real text.
+MAX_PAGE_MARKER_LENGTH = 20
+
+# Note markers are usually a bare digit or a typographic dagger inside a <sup>.
+NOTE_MARKER_RE = re.compile(r'^[\d\s.,;*†‡§¶\[\]()–—-]*$')
+
+# Block-level tags: text on either side of them belongs to separate utterances.
+BLOCK_TAGS = {
+    'address', 'article', 'aside', 'blockquote', 'br', 'caption', 'center', 'dd', 'div', 'dl', 'dt',
+    'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hr',
+    'li', 'main', 'ol', 'p', 'pre', 'section', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul',
+}
+
+# A line already ending in one of these does not need a full stop appended.
+SENTENCE_TERMINALS = '.!?;:…⋯。！？；：'
+# ...possibly followed by a closing quote or bracket.
+CLOSING_MARKS = '”’"\'»›」』）)]}】》〉'
+
+# A section shorter than this is a stub (a lone heading, or a body that was all navigation).
+MIN_SECTION_LENGTH = 200
+# Below this a single-document book is short enough to narrate as one chapter.
+MIN_LENGTH_TO_SPLIT = 60_000
+
+# Table-of-contents titles that mark front/back matter rather than a chapter to narrate.
+FRONT_MATTER_TITLES = {
+    'content', 'contents', 'table of contents', 'toc', 'index', 'copyright', 'copyright page', 'colophon',
+    'acknowledgements', 'acknowledgments', 'bibliography', 'notes', 'endnotes', 'footnotes',
+    'glossary', 'about the author', 'about the publisher', 'cover', 'title page', 'half title',
+    '目录', '目錄', '版权', '版權', '版权页', '版權頁', '索引', '注释', '註釋', '附录', '附錄',
+    '参考文献', '參考文獻', '封面', '扉页', '扉頁', '书名页', '書名頁',
+}
+
+
+def _is_internal_link(tag):
+    href = tag.get('href') or ''
+    return href.startswith('#') or '#' in href
+
+
+def _drop_non_content_elements(soup):
+    """Remove page numbers, note markers/bodies and navigation links, in place."""
+    for tag in soup.find_all(NON_CONTENT_TAGS):
+        tag.decompose()
+
+    for tag in soup.find_all(True):
+        if tag.decomposed:
+            continue
+        # epub:type is namespaced; bs4's lxml parser flattens it to 'epub:type'.
+        epub_types = (tag.get('epub:type') or '').lower().split()
+        roles = (tag.get('role') or '').lower().split()
+        if SKIP_EPUB_TYPES.intersection(epub_types) or SKIP_ROLES.intersection(roles):
+            tag.decompose()
+            continue
+        names = list(tag.get('class') or [])
+        if tag.get('id'):
+            names.append(tag.get('id'))
+        # Guard on length: a <div class="page"> wrapping a whole page is a container, not a marker.
+        if (any(PAGE_MARKER_RE.match(n) for n in names)
+                and len(tag.get_text(strip=True)) <= MAX_PAGE_MARKER_LENGTH):
+            tag.decompose()
+
+    # Superscript note markers: <sup><a href="#fn12">12</a></sup> or a bare <sup>†</sup>.
+    for tag in soup.find_all(['sup', 'sub']):
+        if tag.decomposed:
+            continue
+        if tag.find('a') and any(_is_internal_link(a) for a in tag.find_all('a')):
+            tag.decompose()
+            continue
+        # Subscript digits are chemistry ("H2O"), not note markers, so only <sup> is pruned.
+        if tag.name == 'sup' and NOTE_MARKER_RE.match(tag.get_text(strip=True)):
+            # A superscript right after a digit is an exponent ("10^6"); after a word it is a note.
+            previous = tag.find_previous(string=True)
+            if not (previous and previous.strip()[-1:].isdigit()):
+                tag.decompose()
+
+    return soup
+
+
+def _ends_sentence(line):
+    probe = line.rstrip(CLOSING_MARKS)
+    return bool(probe) and probe[-1] in SENTENCE_TERMINALS
+
+
+def _terminator_for(line):
+    """Use a CJK full stop after CJK text so the voice does not read a stray Latin dot."""
+    return '。' if any(_is_cjk(char) for char in line) else '.'
+
+
+def _is_cjk(char):
+    return ('㐀' <= char <= '鿿' or '豈' <= char <= '﫿'
+            or '぀' <= char <= 'ヿ')
+
+
+def _anchor_at(tag, anchor_ids):
+    """The table-of-contents anchor this tag carries, if any."""
+    for attribute in ('id', 'name'):
+        value = tag.get(attribute)
+        if value and value in anchor_ids:
+            return value
+    return None
+
+
+def _extract_lines(node, anchor_ids=frozenset()):
+    """Walk the tree once, emitting one line per block element, grouped into anchor sections.
+
+    Walking (rather than find_all over a tag whitelist) means text is never emitted twice for
+    nested blocks such as <li><p>…</p></li>, and text in tags outside the whitelist -- bare
+    <div>s, table cells, <br>-separated prose -- is no longer silently dropped.
+
+    Returns a list of (anchor_id, lines) pairs. Without anchor_ids that is a single
+    (None, lines) pair; with them, the document is cut wherever a listed anchor appears.
+    """
+    sections = [(None, [])]
+    buffer = []  # (text, came_from_an_internal_link)
+
+    def flush():
+        if not buffer:
+            return
+        line = re.sub(r'\s+', ' ', ''.join(text for text, _ in buffer)).strip()
+        link_only = re.sub(r'\s+', ' ', ''.join(text for text, is_link in buffer if is_link)).strip()
+        buffer.clear()
+        # A line made up entirely of internal links is navigation: an inline table of
+        # contents, a note backlink. Cross-references inside prose keep their surrounding text.
+        if line and line != link_only:
+            sections[-1][1].append(line)
+
+    def start_section(anchor):
+        flush()
+        if sections[-1][0] is None and not sections[-1][1]:
+            sections[-1] = (anchor, sections[-1][1])  # nothing preceded the first anchor
+        else:
+            sections.append((anchor, []))
+
+    def walk(element, in_link=False):
+        for child in element.children:
+            if isinstance(child, NavigableString):
+                if isinstance(child, (Comment, Doctype, ProcessingInstruction, Declaration, CData)):
+                    continue
+                buffer.append((str(child), in_link))
+                continue
+            anchor = _anchor_at(child, anchor_ids)
+            if anchor:
+                start_section(anchor)
+            if child.name in BLOCK_TAGS:
+                flush()
+                walk(child, in_link)
+                flush()
+            else:
+                walk(child, in_link or (child.name == 'a' and _is_internal_link(child)))
+
+    walk(node)
+    flush()
+    return sections
+
+
+def _lines_to_text(lines):
+    return ''.join(
+        line + ('' if _ends_sentence(line) else _terminator_for(line)) + '\n'
+        for line in lines
+    )
+
+
+def extract_sections_from_html(xml, anchor_ids=()):
+    """Extract narratable text, cut into (anchor_id, text) sections at the given anchors."""
+    soup = BeautifulSoup(xml, features='lxml')
+    _drop_non_content_elements(soup)
+    return [(anchor, _lines_to_text(lines)) for anchor, lines in _extract_lines(soup, frozenset(anchor_ids))]
+
+
+def extract_text_from_html(xml):
+    """Extract narratable text from a chapter's body, dropping page numbers, notes and navigation."""
+    return ''.join(text for _, text in extract_sections_from_html(xml))
+
+
+def toc_entries_by_file(book):
+    """Map each document href to the [(anchor, title)] the table of contents gives it.
+
+    ebooklib rewrites documents on read and drops <head>, so the document's own <title> is
+    gone by the time we see it; the ncx/nav table of contents is what survives.
+    """
+    entries_by_file = {}
+
+    def visit(entries):
+        for entry in entries:
+            if isinstance(entry, (tuple, list)):
+                visit(entry)
+                continue
+            href, title = getattr(entry, 'href', None), getattr(entry, 'title', None)
+            if not href or not title:
+                continue
+            file_name, _, anchor = href.partition('#')
+            entries_by_file.setdefault(file_name, []).append((anchor, title))
+
+    try:
+        visit(book.toc)
+    except Exception:
+        pass
+    return entries_by_file
+
+
+def toc_entries_for(chapter_name, entries_by_file):
+    if chapter_name in entries_by_file:
+        return entries_by_file[chapter_name]
+    basename = chapter_name.rsplit('/', 1)[-1]
+    for href, entries in entries_by_file.items():
+        if href.rsplit('/', 1)[-1] == basename:
+            return entries
+    return []
+
+
+def looks_like_front_matter(title):
+    return title.strip().lower().strip('《》「」『』()[]:：.、 ') in FRONT_MATTER_TITLES
+
+
+def is_front_matter(chapter_name, entries_by_file):
+    """True for documents the table of contents names as contents/index/copyright/notes."""
+    entries = toc_entries_for(chapter_name, entries_by_file)
+    # Several entries pointing at one file means it holds the whole book, not one front section.
+    if len(entries) != 1:
+        return False
+    return looks_like_front_matter(entries[0][1])
+
+
+class SplitChapter:
+    """One section of a single-file book, standing in for an epub document.
+
+    Books that ship as a single huge xhtml file would otherwise become one giant chapter with
+    no chapter marks, so they are cut at the anchors their table of contents points to.
+    """
+
+    def __init__(self, source, anchor, title, extracted_text):
+        self.source = source
+        self.anchor = anchor
+        self.title = title
+        self.extracted_text = extracted_text
+        self.is_front_matter = looks_like_front_matter(title)
+
+    def get_name(self):
+        return f'{self.source.get_name()}#{self.anchor}' if self.anchor else self.source.get_name()
+
+    def get_type(self):
+        return ebooklib.ITEM_DOCUMENT
+
+    def get_id(self):
+        return self.get_name()
+
+
+def split_on_toc_anchors(chapter, entries, sections):
+    """Turn the extracted (anchor, text) sections of one document into SplitChapters.
+
+    Books commonly put a bare "Chapter 4" divider at its own anchor, just before the anchor
+    holding the actual text. Such a stub is merged into the section that follows -- keeping its
+    words and its more descriptive title -- rather than becoming a two-second chapter of its own.
+    """
+    titles = dict(entries)
+    split_chapters = []
+    pending_text, pending_anchor = '', None
+
+    for anchor, text in sections:
+        if not text.strip():
+            continue  # an inline table of contents: nothing left once navigation is dropped
+        combined = pending_text + text
+        if len(combined.strip()) < MIN_SECTION_LENGTH:
+            if pending_anchor is None:
+                pending_anchor = anchor
+            pending_text = combined
+            continue
+        anchor = pending_anchor or anchor
+        title = titles.get(anchor) or chapter_display_name(chapter)
+        split_chapters.append(SplitChapter(chapter, anchor, title, combined))
+        pending_text, pending_anchor = '', None
+
+    if pending_text.strip() and split_chapters:
+        split_chapters[-1].extracted_text += pending_text  # a trailing stub
+    elif pending_text.strip():
+        title = titles.get(pending_anchor) or chapter_display_name(chapter)
+        split_chapters.append(SplitChapter(chapter, pending_anchor, title, pending_text))
+    return split_chapters
+
+
+def chapter_display_name(chapter):
+    return getattr(chapter, 'title', '') or chapter.get_name()
+
+
 def find_document_chapters_and_extract_texts(book):
-    """Returns every chapter that is an ITEM_DOCUMENT and enriches each chapter with extracted_text."""
-    document_chapters = []
+    """Returns every chapter that is an ITEM_DOCUMENT and enriches each chapter with extracted_text.
+
+    A book delivered as one big document is split into a chapter per table-of-contents anchor.
+    """
+    entries_by_file = toc_entries_by_file(book)
+    extracted = []
     for chapter in book.get_items():
         if chapter.get_type() != ebooklib.ITEM_DOCUMENT:
             continue
-        xml = chapter.get_body_content()
-        soup = BeautifulSoup(xml, features='lxml')
-        chapter.extracted_text = ''
-        html_content_tags = ['title', 'p', 'h1', 'h2', 'h3', 'h4', 'li']
-        for text in [c.text.strip() for c in soup.find_all(html_content_tags) if c.text]:
-            if not text.endswith('.'):
-                text += '.'
-            chapter.extracted_text += text + '\n'
+        entries = toc_entries_for(chapter.get_name(), entries_by_file)
+        anchors = [anchor for anchor, _ in entries if anchor]
+        sections = extract_sections_from_html(chapter.get_body_content(), anchors)
+        extracted.append((chapter, entries, sections))
+
+    substantial = sum(1 for _, _, sections in extracted
+                      if sum(len(text.strip()) for _, text in sections) > MIN_SECTION_LENGTH)
+
+    document_chapters = []
+    for chapter, entries, sections in extracted:
+        full_text = ''.join(text for _, text in sections)
+        # Split only books that really are one big file: either this is the book's only
+        # document, or it is long enough that leaving it whole would produce an unusable
+        # single chapter. Ordinary per-chapter files keep their existing one-file-one-chapter
+        # behaviour even when the table of contents points at sections inside them.
+        should_split = (len(sections) > 1
+                        and (substantial <= 1 or len(full_text) > MIN_LENGTH_TO_SPLIT))
+        if should_split:
+            split_chapters = split_on_toc_anchors(chapter, entries, sections)
+            if len(split_chapters) > 1:
+                print(f'Splitting {chapter.get_name()} into {len(split_chapters)} chapters '
+                      f'on its table of contents anchors.')
+                document_chapters.extend(split_chapters)
+                continue
+        chapter.extracted_text = full_text
+        chapter.is_front_matter = is_front_matter(chapter.get_name(), entries_by_file)
         document_chapters.append(chapter)
+
     for i, c in enumerate(document_chapters):
         c.chapter_index = i  # this is used in the UI to identify chapters
     return document_chapters
@@ -289,10 +612,13 @@ def chapter_beginning_one_liner(c, chars=20):
 
 
 def find_good_chapters(document_chapters):
-    chapters = [c for c in document_chapters if c.get_type() == ebooklib.ITEM_DOCUMENT and is_chapter(c)]
+    narratable = [c for c in document_chapters
+                  if c.get_type() == ebooklib.ITEM_DOCUMENT
+                  and not getattr(c, 'is_front_matter', False)]
+    chapters = [c for c in narratable if is_chapter(c)]
     if len(chapters) == 0:
         print('Not easy to recognize the chapters, defaulting to all non-empty documents.')
-        chapters = [c for c in document_chapters if c.get_type() == ebooklib.ITEM_DOCUMENT and len(c.extracted_text) > 10]
+        chapters = [c for c in narratable if len(c.extracted_text) > 10]
     return chapters
 
 
@@ -408,15 +734,23 @@ def probe_duration(file_name):
     return float(proc.stdout.strip())
 
 
-def create_index_file(title, creator, chapter_mp3_files, output_folder):
+def escape_metadata(value):
+    """ffmetadata treats =, ;, # and \\ as special, and does not allow raw newlines."""
+    escaped = re.sub(r'([=;#\\])', r'\\\1', str(value))
+    return escaped.replace('\n', ' ').strip()
+
+
+def create_index_file(title, creator, chapter_mp3_files, output_folder, chapter_titles=None):
+    chapter_titles = chapter_titles or {}
     with open(Path(output_folder) / "chapters.txt", "w", encoding="utf-8") as f:
-        f.write(f";FFMETADATA1\ntitle={title}\nartist={creator}\n\n")
+        f.write(f";FFMETADATA1\ntitle={escape_metadata(title)}\nartist={escape_metadata(creator)}\n\n")
         start = 0
         i = 0
         for c in chapter_mp3_files:
             duration = probe_duration(c)
             end = start + (int)(duration * 1000)
-            f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle=Chapter {i}\n\n")
+            chapter_title = escape_metadata(chapter_titles.get(str(c)) or f'Chapter {i}')
+            f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle={chapter_title}\n\n")
             i += 1
             start = end
 

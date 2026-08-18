@@ -394,7 +394,10 @@ class MainWindow(wx.Frame):
         good_chapters = find_good_chapters(self.document_chapters)
         self.selected_chapter = good_chapters[0]
         for chapter in self.document_chapters:
-            chapter.short_name = chapter.get_name().replace('.xhtml', '').replace('xhtml/', '').replace('.html', '').replace('Text/', '')
+            file_name = chapter.get_name().replace('.xhtml', '').replace('xhtml/', '').replace('.html', '').replace('Text/', '')
+            # Chapters split out of a single-file book are named after their table-of-contents
+            # entry, which reads far better than "index_split_000#anchor14".
+            chapter.short_name = getattr(chapter, 'title', '') or file_name
             chapter.is_selected = chapter in good_chapters
 
         self.create_layout_for_ebook(self.splitter)
