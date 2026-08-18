@@ -17,6 +17,7 @@ from PIL import Image
 from tempfile import NamedTemporaryFile
 from pathlib import Path
 
+from audiblez.backends import mlx_available, resolve_backend
 from audiblez.voices import voices, flags
 
 EVENTS = {
@@ -40,6 +41,7 @@ class MainWindow(wx.Frame):
         self.selected_chapter = None
         self.selected_book = None
         self.synthesis_in_progress = False
+        self.selected_backend = 'auto'  # the params panel only exists once a book is open
 
         self.Bind(EVENTS['CORE_STARTED'][1], self.on_core_started)
         self.Bind(EVENTS['CORE_CHAPTER_STARTED'][1], self.on_core_chapter_started)
@@ -269,23 +271,45 @@ class MainWindow(wx.Frame):
         sizer = wx.GridBagSizer(10, 10)
         panel.SetSizer(sizer)
 
-        engine_label = wx.StaticText(panel, label="Engine:")
-        engine_radio_panel = wx.Panel(panel)
+        # Backend: which TTS engine runs. MLX is Apple Silicon only and much faster.
+        backend_label = wx.StaticText(panel, label="Backend:")
+        self.selected_backend = 'auto'
+        backend_choices = ['auto', 'torch'] + (['mlx'] if mlx_available() else [])
+        backend_dropdown = wx.ComboBox(panel, choices=backend_choices, value='auto', style=wx.CB_READONLY)
+        backend_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_backend)
+        sizer.Add(backend_label, pos=(0, 0), flag=wx.ALL, border=border)
+        sizer.Add(backend_dropdown, pos=(0, 1), flag=wx.ALL, border=border)
+
+        resolved = resolve_backend('auto')
+        if mlx_available():
+            backend_note = f'MLX available — "auto" will use it (faster)'
+        elif platform.system() == 'Darwin' and platform.machine() == 'arm64':
+            backend_note = 'Install audiblez[mlx] for a faster Apple Silicon backend'
+        else:
+            backend_note = f'"auto" will use {resolved}'
+        self.backend_note = wx.StaticText(panel, label=backend_note)
+        self.backend_note.SetForegroundColour(wx.Colour(110, 110, 110))
+        sizer.Add(self.backend_note, pos=(1, 1), flag=wx.ALL, border=border)
+
+        # Device only affects the torch backend; MLX always runs on the Apple GPU.
+        self.device_label = wx.StaticText(panel, label="Torch device:")
+        engine_radio_panel = self.device_panel = wx.Panel(panel)
         cpu_radio = wx.RadioButton(engine_radio_panel, label="CPU", style=wx.RB_GROUP)
-        cuda_radio = wx.RadioButton(engine_radio_panel, label="CUDA")
+        cuda_radio = self.cuda_radio = wx.RadioButton(engine_radio_panel, label="CUDA")
         if torch.cuda.is_available():
             cuda_radio.SetValue(True)
         else:
             cpu_radio.SetValue(True)
-            # cuda_radio.Disable()
-        sizer.Add(engine_label, pos=(0, 0), flag=wx.ALL, border=border)
-        sizer.Add(engine_radio_panel, pos=(0, 1), flag=wx.ALL, border=border)
+            cuda_radio.Disable()  # no CUDA on this machine; the radio was misleading
+        sizer.Add(self.device_label, pos=(2, 0), flag=wx.ALL, border=border)
+        sizer.Add(engine_radio_panel, pos=(2, 1), flag=wx.ALL, border=border)
         engine_radio_panel_sizer = wx.BoxSizer(wx.HORIZONTAL)
         engine_radio_panel.SetSizer(engine_radio_panel_sizer)
         engine_radio_panel_sizer.Add(cpu_radio, 0, wx.ALL, 5)
         engine_radio_panel_sizer.Add(cuda_radio, 0, wx.ALL, 5)
         cpu_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cpu'))
         cuda_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cuda'))
+        self.update_device_row()
 
         # Create a list of voices with flags
         flag_and_voice_list = []
@@ -296,18 +320,24 @@ class MainWindow(wx.Frame):
         voice_label = wx.StaticText(panel, label="Voice:")
         default_voice = flag_and_voice_list[0]
         self.selected_voice = default_voice
+        # Editable: a voice can also be a blend ("af_heart,af_bella") or a path to a .pt pack.
         voice_dropdown = wx.ComboBox(panel, choices=flag_and_voice_list, value=default_voice)
         voice_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_voice)
-        sizer.Add(voice_label, pos=(1, 0), flag=wx.ALL, border=border)
-        sizer.Add(voice_dropdown, pos=(1, 1), flag=wx.ALL, border=border)
+        voice_dropdown.Bind(wx.EVT_TEXT, self.on_select_voice)
+        sizer.Add(voice_label, pos=(3, 0), flag=wx.ALL, border=border)
+        sizer.Add(voice_dropdown, pos=(3, 1), flag=wx.ALL | wx.EXPAND, border=border)
+
+        voice_note = wx.StaticText(panel, label='Blend voices with commas, or type a path to a .pt voice')
+        voice_note.SetForegroundColour(wx.Colour(110, 110, 110))
+        sizer.Add(voice_note, pos=(4, 1), flag=wx.ALL, border=border)
 
         # Add dropdown for speed
         speed_label = wx.StaticText(panel, label="Speed:")
         speed_text_input = wx.TextCtrl(panel, value="1.0")
         self.selected_speed = '1.0'
         speed_text_input.Bind(wx.EVT_TEXT, self.on_select_speed)
-        sizer.Add(speed_label, pos=(2, 0), flag=wx.ALL, border=border)
-        sizer.Add(speed_text_input, pos=(2, 1), flag=wx.ALL, border=border)
+        sizer.Add(speed_label, pos=(5, 0), flag=wx.ALL, border=border)
+        sizer.Add(speed_text_input, pos=(5, 1), flag=wx.ALL, border=border)
 
         # Add file dialog selector to select output folder
         output_folder_label = wx.StaticText(panel, label="Output Folder:")
@@ -316,9 +346,9 @@ class MainWindow(wx.Frame):
         # self.output_folder_text_ctrl.SetMinSize((200, -1))
         output_folder_button = wx.Button(panel, label="📂 Select")
         output_folder_button.Bind(wx.EVT_BUTTON, self.open_output_folder_dialog)
-        sizer.Add(output_folder_label, pos=(3, 0), flag=wx.ALL, border=border)
-        sizer.Add(self.output_folder_text_ctrl, pos=(3, 1), flag=wx.ALL | wx.EXPAND, border=border)
-        sizer.Add(output_folder_button, pos=(4, 1), flag=wx.ALL, border=border)
+        sizer.Add(output_folder_label, pos=(6, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.output_folder_text_ctrl, pos=(6, 1), flag=wx.ALL | wx.EXPAND, border=border)
+        sizer.Add(output_folder_button, pos=(7, 1), flag=wx.ALL, border=border)
 
     def create_synthesis_panel(self):
         # Think and identify layout issue with the folling code
@@ -367,6 +397,16 @@ class MainWindow(wx.Frame):
 
     def on_select_voice(self, event):
         self.selected_voice = event.GetString()
+
+    def on_select_backend(self, event):
+        self.selected_backend = event.GetString()
+        self.update_device_row()
+
+    def update_device_row(self):
+        """The torch device radio is meaningless when MLX will actually run."""
+        uses_torch = resolve_backend(self.selected_backend) == 'torch'
+        self.device_label.Enable(uses_torch)
+        self.device_panel.Enable(uses_torch)
 
     def on_select_speed(self, event):
         speed = float(event.GetString())
@@ -474,7 +514,12 @@ class MainWindow(wx.Frame):
         return panel
 
     def get_selected_voice(self):
-        return self.selected_voice.split(' ')[1]
+        """Strip the flag emoji the dropdown prepends, tolerating typed-in custom voices."""
+        voice = self.selected_voice.strip()
+        first, _, rest = voice.partition(' ')
+        if rest and first in flags.values():
+            return rest.strip()
+        return voice
 
     def get_selected_speed(self):
         return float(self.selected_speed)
@@ -487,8 +532,11 @@ class MainWindow(wx.Frame):
 
         def generate_preview():
             import audiblez.core as core
-            from kokoro import KPipeline
-            pipeline = KPipeline(lang_code=lang_code)
+            from audiblez.backends import get_pipeline
+            # Same engine as the real run, or previews stop being representative.
+            core.set_espeak_library()
+            pipeline = get_pipeline(self.get_selected_voice(), lang_code=lang_code,
+                                    backend=self.selected_backend)
             core.load_spacy()
             text = self.selected_chapter.extracted_text[:300]
             if len(text) == 0: return
@@ -516,7 +564,7 @@ class MainWindow(wx.Frame):
     def on_start(self, event):
         self.synthesis_in_progress = True
         file_path = self.selected_file_path
-        voice = self.selected_voice.split(' ')[1]  # Remove the flag
+        voice = self.get_selected_voice()
         speed = float(self.selected_speed)
         selected_chapters = [chapter for chapter in self.document_chapters if chapter.is_selected]
         self.start_button.Disable()
@@ -529,11 +577,13 @@ class MainWindow(wx.Frame):
                 self.table.SetItem(chapter_index, 0, '✔️')
 
         # self.stop_button.Show()
-        print('Starting Audiobook Synthesis', dict(file_path=file_path, voice=voice, pick_manually=False, speed=speed))
+        backend = self.selected_backend
+        print('Starting Audiobook Synthesis',
+              dict(file_path=file_path, voice=voice, pick_manually=False, speed=speed, backend=backend))
         self.core_thread = CoreThread(params=dict(
             file_path=file_path, voice=voice, pick_manually=False, speed=speed,
             output_folder=self.output_folder_text_ctrl.GetValue(),
-            selected_chapters=selected_chapters))
+            selected_chapters=selected_chapters, backend=backend))
         self.core_thread.start()
 
     def on_open(self, event):

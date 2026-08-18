@@ -601,6 +601,10 @@ def find_document_chapters_and_extract_texts(book):
                 continue
         chapter.extracted_text = full_text
         chapter.is_front_matter = is_front_matter(chapter.get_name(), entries_by_file)
+        # Name the chapter after its table-of-contents entry. ebooklib leaves .title empty,
+        # so without this the UI and the m4b chapter marks fall back to filenames like "0".
+        if not getattr(chapter, 'title', '') and entries:
+            chapter.title = entries[0][1]
         document_chapters.append(chapter)
 
     for i, c in enumerate(document_chapters):
