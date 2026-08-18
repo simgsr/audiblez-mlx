@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+import warnings
 from unittest import mock
 
 import numpy as np
@@ -178,6 +179,161 @@ class GetPipelineTest(unittest.TestCase):
                  mock.patch.object(backends, 'set_espeak_data_path', return_value='/data'):
                 pipeline = get_pipeline('/voices/custom.pt', lang_code='b', backend='mlx')
         self.assertEqual(pipeline.lang_code, 'b')
+
+
+class FakeQwenModel:
+    """Stands in for mlx-audio's Qwen3-TTS, which also accepts temperature."""
+
+    def __init__(self):
+        self.calls = []
+
+    def generate(self, text, voice, speed, lang_code, split_pattern=None, temperature=None):
+        self.calls.append(dict(text=text, voice=voice, speed=speed, lang_code=lang_code,
+                               split_pattern=split_pattern, temperature=temperature))
+        yield FakeResult(np.zeros(64, dtype=np.float32))
+
+
+class ModelRegistryTest(unittest.TestCase):
+    def test_unknown_model_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            backends.model_spec('festival-tts')
+        self.assertIn('festival-tts', str(ctx.exception))
+
+    def test_qwen_on_torch_names_the_supported_runtime(self):
+        with mock.patch.object(backends, 'torch_available', return_value=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                get_pipeline('ryan', backend='torch', model='qwen3-tts')
+        message = str(ctx.exception)
+        self.assertIn('mlx', message)
+        self.assertIn('kokoro', message)
+
+    def test_default_model_is_unchanged(self):
+        # Regression guard for every existing call site: no model= must behave as before.
+        with mock.patch.object(backends, 'mlx_available', return_value=True):
+            model = FakeMlxModel()
+            with mock.patch.dict(sys.modules, fake_mlx_audio(model)), \
+                 mock.patch.object(backends, 'set_espeak_data_path', return_value='/data'):
+                pipeline = get_pipeline('af_sky', backend='mlx')
+        self.assertEqual(pipeline.repo_id, backends.MODELS['kokoro']['repos']['mlx'])
+        self.assertEqual(pipeline.lang_code, 'a')
+
+
+class LanguageMappingTest(unittest.TestCase):
+    def test_kokoro_codes_map_to_qwen_names(self):
+        self.assertEqual(backends.resolve_lang_code('a', 'qwen3-tts'), 'english')
+        self.assertEqual(backends.resolve_lang_code('b', 'qwen3-tts'), 'english')
+        self.assertEqual(backends.resolve_lang_code('z', 'qwen3-tts'), 'chinese')
+
+    def test_qwen_names_pass_through(self):
+        self.assertEqual(backends.resolve_lang_code('chinese', 'qwen3-tts'), 'chinese')
+        self.assertEqual(backends.resolve_lang_code('german', 'qwen3-tts'), 'german')
+
+    def test_kokoro_is_left_alone(self):
+        self.assertEqual(backends.resolve_lang_code('a', 'kokoro'), 'a')
+
+    def test_hindi_is_rejected_by_name(self):
+        with self.assertRaises(ValueError) as ctx:
+            backends.resolve_lang_code('h', 'qwen3-tts')
+        self.assertIn('Hindi', str(ctx.exception))
+
+    def test_qwen_voice_does_not_derive_language_from_its_name(self):
+        # 'ryan'[0] == 'r', which is not a language; it must fall back to auto-detect.
+        self.assertEqual(backends.default_lang_code('ryan', 'qwen3-tts'), 'auto')
+        self.assertEqual(backends.default_lang_code('af_sky', 'kokoro'), 'a')
+
+
+class ThroughputSeedTest(unittest.TestCase):
+    def test_chinese_seed_differs_from_the_default(self):
+        with mock.patch.object(backends, 'resolve_backend', return_value='mlx'):
+            self.assertEqual(backends.initial_chars_per_sec('mlx', 'a', 'kokoro'), 900)
+            self.assertEqual(backends.initial_chars_per_sec('mlx', 'z', 'kokoro'), 150)
+            self.assertEqual(backends.initial_chars_per_sec('mlx', 'a', 'qwen3-tts'), 60)
+            self.assertEqual(backends.initial_chars_per_sec('mlx', 'z', 'qwen3-tts'), 27)
+
+    def test_unknown_language_falls_back_to_the_default(self):
+        with mock.patch.object(backends, 'resolve_backend', return_value='mlx'):
+            self.assertEqual(backends.initial_chars_per_sec('mlx', None, 'kokoro'), 900)
+            self.assertEqual(backends.initial_chars_per_sec('mlx', 'f', 'kokoro'), 900)
+
+
+class QwenAdapterTest(unittest.TestCase):
+    def build(self, lang_code='english', temperature=None):
+        model = FakeQwenModel()
+        with mock.patch.dict(sys.modules, fake_mlx_audio(model)), \
+             mock.patch.object(backends, 'set_espeak_data_path', return_value='/data'):
+            pipeline = backends.MlxPipeline(lang_code, model='qwen3-tts', temperature=temperature)
+        return pipeline, model
+
+    def test_forwards_a_low_temperature_by_default(self):
+        pipeline, model = self.build()
+        list(pipeline('Hello.', voice='ryan'))
+        self.assertEqual(model.calls[0]['temperature'], backends.QWEN_DEFAULT_TEMPERATURE)
+        self.assertLess(backends.QWEN_DEFAULT_TEMPERATURE, 0.9)  # below the library default
+
+    def test_explicit_temperature_wins(self):
+        pipeline, model = self.build(temperature=0.1)
+        list(pipeline('Hello.', voice='ryan'))
+        self.assertEqual(model.calls[0]['temperature'], 0.1)
+
+    def test_kokoro_is_never_given_a_temperature(self):
+        model = FakeMlxModel()  # its generate() has no temperature parameter at all
+        with mock.patch.dict(sys.modules, fake_mlx_audio(model)), \
+             mock.patch.object(backends, 'set_espeak_data_path', return_value='/data'):
+            pipeline = backends.MlxPipeline('a', model='kokoro')
+        list(pipeline('Hello.', voice='af_sky'))
+        self.assertEqual(len(model.calls), 1)
+
+    def test_unsupported_speed_warns_once_but_does_not_raise(self):
+        pipeline, model = self.build()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            list(pipeline('One.', voice='ryan', speed=1.5))
+            list(pipeline('Two.', voice='ryan', speed=1.5))
+        self.assertEqual(len(caught), 1, 'the warning should not repeat per sentence')
+        self.assertIn('speed', str(caught[0].message))
+        self.assertEqual(len(model.calls), 2)
+
+    def test_speed_of_one_is_silent(self):
+        pipeline, _ = self.build()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            list(pipeline('Hello.', voice='ryan', speed=1.0))
+        self.assertEqual(caught, [])
+
+    def test_lang_code_is_translated_at_construction(self):
+        pipeline, _ = self.build(lang_code='z')
+        self.assertEqual(pipeline.lang_code, 'chinese')
+
+
+class VoiceRegistryTest(unittest.TestCase):
+    def test_qwen_speakers_are_listed(self):
+        from audiblez.voices import flat_voices
+        speakers = flat_voices('qwen3-tts')
+        self.assertEqual(len(speakers), 9)
+        self.assertIn('ryan', speakers)
+        self.assertIn('serena', speakers)
+
+    def test_kokoro_table_is_unchanged(self):
+        from audiblez.voices import flat_voices
+        self.assertEqual(len(flat_voices('kokoro')), 54)
+
+    def test_voice_language_lookup(self):
+        from audiblez.voices import voice_language
+        self.assertEqual(voice_language('ryan', 'qwen3-tts'), 'a')
+        self.assertEqual(voice_language('serena', 'qwen3-tts'), 'z')
+        self.assertIsNone(voice_language('af_sky', 'qwen3-tts'))
+
+    def test_every_qwen_language_has_a_flag(self):
+        # The GUI prefixes a flag and get_selected_voice strips it again; a missing flag
+        # would leave the emoji in the voice name and reach the model as an unknown speaker.
+        from audiblez.voices import flags, voices_for
+        for lang in voices_for('qwen3-tts'):
+            self.assertIn(lang, flags)
+
+    def test_unknown_model_is_rejected(self):
+        from audiblez.voices import voices_for
+        with self.assertRaises(ValueError):
+            voices_for('festival-tts')
 
 
 class MeasuredEtaTest(unittest.TestCase):

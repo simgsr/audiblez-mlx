@@ -17,8 +17,16 @@ from tempfile import NamedTemporaryFile
 from pathlib import Path
 
 from audiblez import DEFAULT_OUTPUT_FOLDER
-from audiblez.backends import mlx_available, resolve_backend, torch_available
-from audiblez.voices import voices, flags
+from audiblez.backends import (DEFAULT_MODEL, MODELS, default_lang_code, mlx_available,
+                               resolve_backend, torch_available)
+from audiblez.voices import flags, voices_for
+
+# Shown under the Model dropdown. The cost of the slow model has to be visible *before*
+# a multi-hour run starts, not discovered by watching a progress bar all evening.
+MODEL_NOTES = {
+    'kokoro': '54 voices, fast (~666 chars/sec English, ~150 Chinese)',
+    'qwen3-tts': '9 voices, expressive — but ~10x slower (~2h for a novel), 2.9 GB download',
+}
 
 EVENTS = {
     'CORE_STARTED': NewEvent(),
@@ -41,7 +49,9 @@ class MainWindow(wx.Frame):
         self.selected_chapter = None
         self.selected_book = None
         self.synthesis_in_progress = False
-        self.selected_backend = 'auto'  # the params panel only exists once a book is open
+        # The params panel only exists once a book is open, so these need a value before it.
+        self.selected_backend = 'auto'
+        self.selected_model = DEFAULT_MODEL
 
         self.Bind(EVENTS['CORE_STARTED'][1], self.on_core_started)
         self.Bind(EVENTS['CORE_CHAPTER_STARTED'][1], self.on_core_chapter_started)
@@ -270,15 +280,31 @@ class MainWindow(wx.Frame):
         sizer = wx.GridBagSizer(10, 10)
         panel.SetSizer(sizer)
 
-        # Backend: which TTS engine runs. MLX is Apple Silicon only and much faster.
+        # Model: which weights run. Chosen first, because it decides what the Voice and
+        # Speed rows below may contain. Qwen is only offered when MLX can actually run it.
+        model_label = wx.StaticText(panel, label="Model:")
+        self.selected_model = DEFAULT_MODEL
+        model_choices = [DEFAULT_MODEL] + ([m for m in sorted(MODELS)
+                                            if m != DEFAULT_MODEL] if mlx_available() else [])
+        model_dropdown = wx.ComboBox(panel, choices=model_choices, value=DEFAULT_MODEL,
+                                     style=wx.CB_READONLY)
+        model_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_model)
+        sizer.Add(model_label, pos=(0, 0), flag=wx.ALL, border=border)
+        sizer.Add(model_dropdown, pos=(0, 1), flag=wx.ALL, border=border)
+
+        self.model_note = wx.StaticText(panel, label='')
+        self.model_note.SetForegroundColour(wx.Colour(110, 110, 110))
+        sizer.Add(self.model_note, pos=(1, 1), flag=wx.ALL, border=border)
+
+        # Backend: which TTS runtime runs. MLX is Apple Silicon only and much faster.
         backend_label = wx.StaticText(panel, label="Backend:")
         self.selected_backend = 'auto'
         backend_choices = ['auto'] + (['mlx'] if mlx_available() else []) + \
                           (['torch'] if torch_available() else [])
         backend_dropdown = wx.ComboBox(panel, choices=backend_choices, value='auto', style=wx.CB_READONLY)
         backend_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_backend)
-        sizer.Add(backend_label, pos=(0, 0), flag=wx.ALL, border=border)
-        sizer.Add(backend_dropdown, pos=(0, 1), flag=wx.ALL, border=border)
+        sizer.Add(backend_label, pos=(2, 0), flag=wx.ALL, border=border)
+        sizer.Add(backend_dropdown, pos=(2, 1), flag=wx.ALL, border=border)
 
         resolved = resolve_backend('auto')
         if mlx_available():
@@ -289,7 +315,7 @@ class MainWindow(wx.Frame):
             backend_note = f'"auto" will use {resolved}'
         self.backend_note = wx.StaticText(panel, label=backend_note)
         self.backend_note.SetForegroundColour(wx.Colour(110, 110, 110))
-        sizer.Add(self.backend_note, pos=(1, 1), flag=wx.ALL, border=border)
+        sizer.Add(self.backend_note, pos=(3, 1), flag=wx.ALL, border=border)
 
         # Device only affects the torch backend; MLX always runs on the Apple GPU.
         self.device_label = wx.StaticText(panel, label="Torch device:")
@@ -305,41 +331,40 @@ class MainWindow(wx.Frame):
                 cuda_radio.SetValue(True)
             cpu_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cpu'))
             cuda_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cuda'))
-        sizer.Add(self.device_label, pos=(2, 0), flag=wx.ALL, border=border)
-        sizer.Add(engine_radio_panel, pos=(2, 1), flag=wx.ALL, border=border)
+        sizer.Add(self.device_label, pos=(4, 0), flag=wx.ALL, border=border)
+        sizer.Add(engine_radio_panel, pos=(4, 1), flag=wx.ALL, border=border)
         engine_radio_panel_sizer = wx.BoxSizer(wx.HORIZONTAL)
         engine_radio_panel.SetSizer(engine_radio_panel_sizer)
         engine_radio_panel_sizer.Add(cpu_radio, 0, wx.ALL, 5)
         engine_radio_panel_sizer.Add(cuda_radio, 0, wx.ALL, 5)
         self.update_device_row()
 
-        # Create a list of voices with flags
-        flag_and_voice_list = []
-        for code, l in voices.items():
-            for v in l:
-                flag_and_voice_list.append(f'{flags[code]} {v}')
-
         voice_label = wx.StaticText(panel, label="Voice:")
-        default_voice = flag_and_voice_list[0]
-        self.selected_voice = default_voice
-        # Editable: a voice can also be a blend ("af_heart,af_bella") or a path to a .pt pack.
-        voice_dropdown = wx.ComboBox(panel, choices=flag_and_voice_list, value=default_voice)
-        voice_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_voice)
-        voice_dropdown.Bind(wx.EVT_TEXT, self.on_select_voice)
-        sizer.Add(voice_label, pos=(3, 0), flag=wx.ALL, border=border)
-        sizer.Add(voice_dropdown, pos=(3, 1), flag=wx.ALL | wx.EXPAND, border=border)
+        # Contents follow the selected model -- see update_voice_choices().
+        self.voice_dropdown = wx.ComboBox(panel, choices=[], value='')
+        self.voice_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_voice)
+        self.voice_dropdown.Bind(wx.EVT_TEXT, self.on_select_voice)
+        sizer.Add(voice_label, pos=(5, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.voice_dropdown, pos=(5, 1), flag=wx.ALL | wx.EXPAND, border=border)
 
-        voice_note = wx.StaticText(panel, label='Blend voices with commas, or type a path to a .pt voice')
-        voice_note.SetForegroundColour(wx.Colour(110, 110, 110))
-        sizer.Add(voice_note, pos=(4, 1), flag=wx.ALL, border=border)
+        self.voice_note = wx.StaticText(panel, label='')
+        self.voice_note.SetForegroundColour(wx.Colour(110, 110, 110))
+        sizer.Add(self.voice_note, pos=(6, 1), flag=wx.ALL, border=border)
 
         # Add dropdown for speed
-        speed_label = wx.StaticText(panel, label="Speed:")
-        speed_text_input = wx.TextCtrl(panel, value="1.0")
+        self.speed_label = wx.StaticText(panel, label="Speed:")
+        self.speed_text_input = wx.TextCtrl(panel, value="1.0")
         self.selected_speed = '1.0'
-        speed_text_input.Bind(wx.EVT_TEXT, self.on_select_speed)
-        sizer.Add(speed_label, pos=(5, 0), flag=wx.ALL, border=border)
-        sizer.Add(speed_text_input, pos=(5, 1), flag=wx.ALL, border=border)
+        self.speed_text_input.Bind(wx.EVT_TEXT, self.on_select_speed)
+        sizer.Add(self.speed_label, pos=(7, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.speed_text_input, pos=(7, 1), flag=wx.ALL, border=border)
+
+        self.speed_note = wx.StaticText(panel, label='')
+        self.speed_note.SetForegroundColour(wx.Colour(110, 110, 110))
+        sizer.Add(self.speed_note, pos=(8, 1), flag=wx.ALL, border=border)
+
+        # Populate everything the model governs, now that all those widgets exist.
+        self.update_model_dependent_rows()
 
         # Add file dialog selector to select output folder
         output_folder_label = wx.StaticText(panel, label="Output Folder:")
@@ -350,9 +375,9 @@ class MainWindow(wx.Frame):
         # self.output_folder_text_ctrl.SetMinSize((200, -1))
         output_folder_button = wx.Button(panel, label="📂 Select")
         output_folder_button.Bind(wx.EVT_BUTTON, self.open_output_folder_dialog)
-        sizer.Add(output_folder_label, pos=(6, 0), flag=wx.ALL, border=border)
-        sizer.Add(self.output_folder_text_ctrl, pos=(6, 1), flag=wx.ALL | wx.EXPAND, border=border)
-        sizer.Add(output_folder_button, pos=(7, 1), flag=wx.ALL, border=border)
+        sizer.Add(output_folder_label, pos=(9, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.output_folder_text_ctrl, pos=(9, 1), flag=wx.ALL | wx.EXPAND, border=border)
+        sizer.Add(output_folder_button, pos=(10, 1), flag=wx.ALL, border=border)
 
     def create_synthesis_panel(self):
         # Think and identify layout issue with the folling code
@@ -406,11 +431,57 @@ class MainWindow(wx.Frame):
         self.selected_backend = event.GetString()
         self.update_device_row()
 
+    def on_select_model(self, event):
+        self.selected_model = event.GetString()
+        self.update_model_dependent_rows()
+        self.update_device_row()
+
     def update_device_row(self):
         """The torch device radio is meaningless when MLX will actually run."""
         uses_torch = resolve_backend(self.selected_backend) == 'torch' and torch_available()
         self.device_label.Enable(uses_torch)
         self.device_panel.Enable(uses_torch)
+
+    def update_model_dependent_rows(self):
+        """Repoint the Model note, Voice list and Speed field at the selected model."""
+        self.model_note.SetLabel(MODEL_NOTES.get(self.selected_model, ''))
+        self.update_voice_choices()
+        self.update_speed_row()
+
+    def update_voice_choices(self):
+        """Rebuild the voice dropdown for the selected model.
+
+        Resetting the selection is the point, not a side effect: leaving a Kokoro voice
+        selected after switching to Qwen would send an unknown speaker to the model, which
+        rejects it outright -- and that failure would surface at synthesis time, long after
+        the mistake was made.
+        """
+        model = self.selected_model
+        labelled = [f'{flags[lang]} {voice}'
+                    for lang, names in voices_for(model).items() for voice in names]
+        self.voice_dropdown.SetItems(labelled)
+        self.selected_voice = labelled[0]
+        self.voice_dropdown.SetValue(labelled[0])
+        if model == DEFAULT_MODEL:
+            # Editable: a voice can also be a blend ("af_heart,af_bella") or a .pt path.
+            self.voice_dropdown.SetWindowStyleFlag(wx.CB_DROPDOWN)
+            self.voice_note.SetLabel('Blend voices with commas, or type a path to a .pt voice')
+        else:
+            # Qwen accepts only its own speaker names, so free text can only be an error.
+            self.voice_dropdown.SetWindowStyleFlag(wx.CB_READONLY)
+            self.voice_note.SetLabel('Fixed speakers — no blending and no .pt voice packs')
+
+    def update_speed_row(self):
+        """Disable Speed for models that silently discard it."""
+        supported = MODELS[self.selected_model]['supports_speed']
+        self.speed_label.Enable(supported)
+        self.speed_text_input.Enable(supported)
+        if supported:
+            self.speed_note.SetLabel('')
+        else:
+            # The model accepts speed and ignores it; saying nothing would hand back a
+            # full-length audiobook at the wrong pace with no sign anything went wrong.
+            self.speed_note.SetLabel(f'{self.selected_model} ignores speed — audio plays at 1.0')
 
     def on_select_speed(self, event):
         speed = float(event.GetString())
@@ -529,7 +600,9 @@ class MainWindow(wx.Frame):
         return float(self.selected_speed)
 
     def on_preview_chapter(self, event):
-        lang_code = self.get_selected_voice()[0]
+        # Qwen speaker names carry no language ('ryan' -> 'r' is meaningless), so this has
+        # to go through the model-aware default rather than slicing the voice name.
+        lang_code = default_lang_code(self.get_selected_voice(), self.selected_model)
         button = event.GetEventObject()
         button.SetLabel("⏳")
         button.Disable()
@@ -539,8 +612,9 @@ class MainWindow(wx.Frame):
             from audiblez.backends import get_pipeline
             # Same engine as the real run, or previews stop being representative.
             core.set_espeak_library()
+            # Same engine *and* model as the real run, or previews stop being representative.
             pipeline = get_pipeline(self.get_selected_voice(), lang_code=lang_code,
-                                    backend=self.selected_backend)
+                                    backend=self.selected_backend, model=self.selected_model)
             core.load_spacy()
             text = self.selected_chapter.extracted_text[:300]
             if len(text) == 0: return
@@ -582,12 +656,14 @@ class MainWindow(wx.Frame):
 
         # self.stop_button.Show()
         backend = self.selected_backend
+        model = self.selected_model
         print('Starting Audiobook Synthesis',
-              dict(file_path=file_path, voice=voice, pick_manually=False, speed=speed, backend=backend))
+              dict(file_path=file_path, voice=voice, pick_manually=False, speed=speed,
+                   backend=backend, model=model))
         self.core_thread = CoreThread(params=dict(
             file_path=file_path, voice=voice, pick_manually=False, speed=speed,
             output_folder=self.output_folder_text_ctrl.GetValue(),
-            selected_chapters=selected_chapters, backend=backend))
+            selected_chapters=selected_chapters, backend=backend, model=model))
         self.core_thread.start()
 
     def on_open(self, event):

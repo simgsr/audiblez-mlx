@@ -114,6 +114,10 @@ audiblez-ui
 The GUI shows which backend will actually run, and lets you pick one explicitly. The torch
 device selector is greyed out when MLX is in use, since it has no effect there.
 
+The Model dropdown does the same for the voice list: picking `qwen3-tts` swaps the 54 Kokoro
+voices for its 9 speakers, resets the selection, and greys out Speed with a note explaining
+that model ignores it. Qwen only appears as an option when MLX is available.
+
 ## Windows and Linux
 
 This fork targets Apple Silicon and is not tested on Windows or Linux. The torch backend
@@ -179,6 +183,44 @@ audiblez book.epub -v af_sky --repo-id mlx-community/Kokoro-82M-8bit
 
 If you have an Nvidia GPU, `--cuda` still selects it for the torch backend. It is ignored on
 Apple Silicon, where MLX already runs on the GPU.
+
+## Choosing a model
+
+Kokoro is the default and what you want for almost every book. Qwen3-TTS CustomVoice is
+available as an opt-in alternative with `--model`, and is **never chosen automatically**:
+
+```
+audiblez book.epub -m qwen3-tts -v ryan             # English
+audiblez book.epub -m qwen3-tts -v serena --lang z  # Chinese
+```
+
+Measured on an M5 Max, same passages, both warmed up:
+
+| | Kokoro | Qwen3-TTS 1.7B |
+| --- | --- | --- |
+| English | 666 chars/sec | 62 chars/sec (~10.7x slower) |
+| Chinese | 150 chars/sec | 27 chars/sec (~5.6x slower) |
+| Voices | 54 (28 English) | 9 (**2** English, 5 Chinese) |
+| Download | 339 MB | 2.9 GB |
+| Peak RAM | 0.8 GB | 3.6 GB |
+
+A 500k-character English novel takes roughly 13 minutes on Kokoro and roughly 2.2 hours on
+Qwen. Chinese is the better case for it: the penalty is about half, and it competes against
+Kokoro's weakest voices rather than its strongest.
+
+Three things to know before using it:
+
+- **`--speed` is ignored.** The model accepts the value and discards it. audiblez warns
+  rather than failing, but the audio always plays at 1.0.
+- **Output is not reproducible.** Qwen samples with a temperature, so re-synthesizing one
+  chapter gives audibly different pacing from its neighbours. audiblez defaults to a lower
+  temperature than the library does to reduce this, but it cannot eliminate it. Kokoro is
+  deterministic.
+- **Loudness varies across speakers** by roughly 2x, so audition at matched volume.
+
+Qwen requires the MLX backend; asking for `--backend torch` with it is an error rather than
+a silent fallback. Language is given by name (`english`, `chinese`, `german`, …) or by the
+Kokoro letter, which is translated for you. Hindi is not supported.
 
 ## What gets read
 

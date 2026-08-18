@@ -3,17 +3,22 @@ import argparse
 import sys
 
 from audiblez import DEFAULT_OUTPUT_FOLDER
-from audiblez.voices import voices, available_voices_str
+from audiblez.backends import DEFAULT_MODEL, MODELS
+from audiblez.voices import voices, describe_voices
 
 
 def cli_main():
     voices_str = ', '.join(voices)
+    # The epilog is built before parse_args, so it cannot show only the chosen model's
+    # voices -- list both, grouped, and let the reader pick.
     epilog = ('example:\n' +
               '  audiblez book.epub -l en-us -v af_sky\n\n' +
               'to run GUI just run:\n'
               '  audiblez-ui\n\n' +
-              'available voices:\n' +
-              available_voices_str)
+              'available voices (--model kokoro, the default):\n' +
+              describe_voices('kokoro') + '\n\n' +
+              'available voices (--model qwen3-tts):\n' +
+              describe_voices('qwen3-tts'))
     default_voice = 'af_sky'
     parser = argparse.ArgumentParser(epilog=epilog, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('epub_file_path', help='Path to the epub file')
@@ -27,10 +32,15 @@ def cli_main():
                         help=f'Output folder for the audiobook and intermediate files '
                              f'(default: {DEFAULT_OUTPUT_FOLDER}/, created if missing)')
     parser.add_argument('-b', '--backend', default='auto', choices=['auto', 'torch', 'mlx'],
-                        help='TTS engine: mlx is Apple-Silicon only and faster, auto picks it when available')
+                        help='TTS runtime: mlx is Apple-Silicon only and faster, auto picks it when available')
+    parser.add_argument('-m', '--model', default=DEFAULT_MODEL, choices=sorted(MODELS),
+                        help='TTS model. qwen3-tts is Apple-Silicon only, ~10x slower than kokoro in '
+                             'English (~5x in Chinese), has 9 fixed voices and ignores --speed; it is '
+                             'never chosen automatically')
     parser.add_argument('--lang', default=None, metavar='CODE',
-                        help='Kokoro language code (a, b, e, f, h, i, j, p, z). Defaults to the first letter '
-                             'of the voice name; set it when using a custom .pt voice')
+                        help='Language: a Kokoro code (a, b, e, f, h, i, j, p, z) or, for --model '
+                             'qwen3-tts, a name such as english/chinese/german. Defaults to the first '
+                             'letter of the voice name for kokoro; set it when using a custom .pt voice')
     parser.add_argument('--repo-id', default=None, metavar='REPO',
                         help='Hugging Face model repo to use instead of the backend default')
 
@@ -53,7 +63,7 @@ def cli_main():
 
     from audiblez.core import main
     main(args.epub_file_path, args.voice, args.pick, args.speed, args.output,
-         backend=args.backend, lang_code=args.lang, repo_id=args.repo_id)
+         backend=args.backend, lang_code=args.lang, repo_id=args.repo_id, model=args.model)
 
 
 if __name__ == '__main__':
