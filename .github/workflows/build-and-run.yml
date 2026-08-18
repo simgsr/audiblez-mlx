@@ -44,8 +44,10 @@ jobs:
         run: curl -sSL -o book.epub "$TEST_EPUB_URL"
       - name: Create audiobook
         run: audiblez book.epub -v af_sky
-      - name: Check the m4b was produced
-        run: ls -lah book.m4b
+      - name: Check the m4b landed in the default output folder
+        run: |
+          ls -lah audiobooks/book.m4b
+          test -s audiobooks/book.m4b
 
   # The portable fallback still has to work: no MLX wheel here, so [torch] is required.
   linux-torch-fallback:
@@ -79,5 +81,7 @@ jobs:
         run: curl -sSL -o book.epub "$TEST_EPUB_URL"
       - name: Create audiobook
         run: audiblez book.epub -v af_sky --backend torch
-      - name: Check the m4b was produced
-        run: ls -lah book.m4b
+      - name: Check the m4b landed in the default output folder
+        run: |
+          ls -lah audiobooks/book.m4b
+          test -s audiobooks/book.m4b
