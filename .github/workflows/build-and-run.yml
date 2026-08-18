@@ -1,0 +1,81 @@
+name: Build and run
+run-name: Build and run
+on: [ push, pull_request ]
+
+env:
+  TEST_EPUB_URL: https://github.com/daisy/epub-accessibility-tests/releases/download/fundamental-2.0/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub
+
+jobs:
+  # The platform this fork exists for: Apple Silicon, MLX backend, no torch installed.
+  macos-mlx:
+    runs-on: macos-14  # arm64
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [ '3.10', '3.11', '3.12' ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install ffmpeg, espeak-ng
+        run: brew install ffmpeg espeak-ng
+      - name: Install
+        run: pip install .
+      - name: Check it runs as a script
+        run: audiblez --help
+      - name: Confirm MLX is the resolved backend and torch is absent
+        run: |
+          python - <<'PY'
+          from audiblez.backends import mlx_available, torch_available, resolve_backend
+          assert mlx_available(), 'mlx-audio should install by default on Apple Silicon'
+          assert not torch_available(), 'torch must not be pulled in by the base install'
+          assert resolve_backend('auto') == 'mlx'
+          print('backend: mlx, torch absent - as intended')
+          PY
+      - name: Unit tests
+        run: |
+          python test/test_extract_text.py
+          python test/test_split_chapters.py
+          python test/test_backends.py
+      - name: Download test epub
+        run: curl -sSL -o book.epub "$TEST_EPUB_URL"
+      - name: Create audiobook
+        run: audiblez book.epub -v af_sky
+      - name: Check the m4b was produced
+        run: ls -lah book.m4b
+
+  # The portable fallback still has to work: no MLX wheel here, so [torch] is required.
+  linux-torch-fallback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ffmpeg, espeak-ng
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg espeak-ng
+      - name: Install with the torch extra
+        run: pip install ".[torch]"
+      - name: Confirm the torch backend is selected off Apple Silicon
+        run: |
+          python - <<'PY'
+          from audiblez.backends import mlx_available, torch_available, resolve_backend
+          assert not mlx_available(), 'mlx must not be used off Apple Silicon'
+          assert torch_available(), 'the [torch] extra should provide kokoro'
+          assert resolve_backend('auto') == 'torch'
+          print('backend: torch - as intended')
+          PY
+      - name: Unit tests
+        run: |
+          python test/test_extract_text.py
+          python test/test_split_chapters.py
+          python test/test_backends.py
+      - name: Download test epub
+        run: curl -sSL -o book.epub "$TEST_EPUB_URL"
+      - name: Create audiobook
+        run: audiblez book.epub -v af_sky --backend torch
+      - name: Check the m4b was produced
+        run: ls -lah book.m4b
