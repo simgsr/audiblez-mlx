@@ -117,7 +117,7 @@ def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FO
         # Only characters actually sent to the model, which is what the rate must be based on:
         # chapters skipped because their .wav already exists cost no time.
         synthesized_chars=0,
-        chars_per_sec=initial_chars_per_sec(backend),
+        chars_per_sec=initial_chars_per_sec(backend, lang_code or voice[:1]),
         start_time=time.time())
     print('Started at:', time.strftime('%H:%M:%S'))
     print(f'Total characters: {stats.total_chars:,}')

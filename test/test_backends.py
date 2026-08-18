@@ -106,6 +106,19 @@ class InitialChoresPerSecTest(unittest.TestCase):
             self.assertEqual(backends.initial_chars_per_sec('torch'),
                              backends.CHARS_PER_SEC_GUESS['torch_cpu'])
 
+    def test_chinese_gets_its_own_seed(self):
+        # A CJK character is worth far more speech than a Latin one, so the flat seed is
+        # ~6x optimistic for Chinese and the first ETA is badly wrong without this.
+        with mock.patch.object(backends, 'resolve_backend', return_value='mlx'):
+            self.assertEqual(backends.initial_chars_per_sec('mlx', 'z'), 150)
+            self.assertEqual(backends.initial_chars_per_sec('mlx', 'zf_xiaoxiao'), 150)
+
+    def test_other_languages_keep_the_default_seed(self):
+        with mock.patch.object(backends, 'resolve_backend', return_value='mlx'):
+            for lang in ('a', 'b', 'f', None):
+                self.assertEqual(backends.initial_chars_per_sec('mlx', lang),
+                                 backends.CHARS_PER_SEC_GUESS['mlx'])
+
 
 class MlxAdapterTest(unittest.TestCase):
     def build(self, lang_code='a', repo_id=None):

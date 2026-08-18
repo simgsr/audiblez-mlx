@@ -28,6 +28,14 @@ CHARS_PER_SEC_GUESS = {
     'torch_cpu': 50,
 }
 
+# Per-language overrides. Characters are not equal units of speech: a CJK character carries
+# far more phonemes than a Latin one, so Kokoro measures ~150 chars/sec on Chinese against
+# ~666 on English on the same machine. Without this the first ETA shown for a Chinese book
+# is optimistic by roughly 4-6x, which is worst precisely when the run is longest.
+CHARS_PER_SEC_BY_LANG = {
+    'mlx': {'z': 150},   # measured on an M5 Max
+}
+
 
 def is_apple_silicon():
     return platform.system() == 'Darwin' and platform.machine() == 'arm64'
@@ -71,17 +79,20 @@ def resolve_backend(backend='auto'):
     return 'mlx' if is_apple_silicon() else 'torch'
 
 
-def initial_chars_per_sec(backend):
+def initial_chars_per_sec(backend, lang_code=None):
     """Seed value for the time estimate, before real throughput is known."""
     if resolve_backend(backend) == 'mlx':
-        return CHARS_PER_SEC_GUESS['mlx']
-    try:
-        import torch
-        if torch.cuda.is_available():
-            return CHARS_PER_SEC_GUESS['torch_cuda']
-    except ImportError:
-        pass
-    return CHARS_PER_SEC_GUESS['torch_cpu']
+        key = 'mlx'
+    else:
+        key = 'torch_cpu'
+        try:
+            import torch
+            if torch.cuda.is_available():
+                key = 'torch_cuda'
+        except ImportError:
+            pass
+    by_lang = CHARS_PER_SEC_BY_LANG.get(key, {})
+    return by_lang.get(str(lang_code or '')[:1], CHARS_PER_SEC_GUESS[key])
 
 
 def find_espeak_data_path():
