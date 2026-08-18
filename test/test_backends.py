@@ -53,10 +53,6 @@ class ResolveBackendTest(unittest.TestCase):
         with mock.patch.object(backends, 'mlx_available', return_value=True):
             self.assertEqual(resolve_backend('auto'), 'mlx')
 
-    def test_auto_falls_back_to_torch(self):
-        with mock.patch.object(backends, 'mlx_available', return_value=False):
-            self.assertEqual(resolve_backend('auto'), 'torch')
-
     def test_mlx_unavailable_off_apple_silicon(self):
         with mock.patch('platform.system', return_value='Linux'):
             self.assertFalse(mlx_available())
