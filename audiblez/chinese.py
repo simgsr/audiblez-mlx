@@ -24,6 +24,7 @@ audio you get is what a Mandarin reader would say when reading the traditional p
 The conversion applies to the narration path only. Titles, chapter marks and everything
 else written into the .m4b keep the book's original characters.
 """
+import os
 import re
 import warnings
 
@@ -53,6 +54,54 @@ _HANGUL_RE = re.compile(r'[ᄀ-ᇿ가-힯]')
 _converter = None
 _converter_failed = False
 _announced = False
+
+
+def repair_jieba_resource_loader():
+    """Let jieba load its dictionary on setuptools 81-83. Returns True if it patched.
+
+    jieba reads its dictionary through `pkg_resources.resource_stream`, behind a bare
+    `except ImportError`. setuptools 81 removed `resource_stream` while keeping the
+    `pkg_resources` module, so the import succeeds and the *call* raises AttributeError --
+    which that guard does not catch, and jieba dies on the first word it segments. Since
+    misaki[zh] segments with jieba, that takes every Chinese book down with it.
+
+    The window is narrow in both directions, which is what makes this easy to miss:
+    setuptools < 81 still has the function, and >= 84 drops `pkg_resources` altogether so
+    the guard fires and jieba's own file-open fallback works. jieba's last release was
+    2020, so there is no fixed version to require.
+
+    Worse, jieba caches its parsed dictionary in a temp file and only calls the loader on a
+    cache miss, so a developer machine with a warm `jieba.cache` passes while a fresh CI
+    runner fails on the same code -- which is exactly how this reached CI unnoticed.
+
+    Called on import, because jieba initializes lazily on first use and misaki reaches it
+    without passing back through this module.
+    """
+    try:
+        import pkg_resources
+    except ImportError:
+        return False                                # >= 84: jieba's own fallback works
+    if hasattr(pkg_resources, 'resource_stream'):
+        return False                                # < 81: jieba's normal path works
+    try:
+        import jieba
+        from jieba import _compat
+    except ImportError:
+        return False                                # no misaki[zh]; nothing to repair
+
+    def open_module_res(*res):
+        # The file jieba's own ImportError fallback would have opened.
+        return open(os.path.join(os.path.dirname(_compat.__file__), *res), 'rb')
+
+    # jieba does `from ._compat import *`, then calls get_module_res from its own
+    # namespace, so that binding is the one that has to change; _compat is patched too so
+    # anything reading it there sees the same thing.
+    _compat.get_module_res = open_module_res
+    jieba.get_module_res = open_module_res
+    return True
+
+
+repair_jieba_resource_loader()
 
 
 def _get_converter():

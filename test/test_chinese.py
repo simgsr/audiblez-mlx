@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+import sys
+import types
 import unittest
 from unittest import mock
 
@@ -122,6 +124,46 @@ class TestPronunciation(unittest.TestCase):
         self.assertIn('ꭧu↘', raw)      # zhù -- wrong
         self.assertNotIn('ꭧu↘', fixed)  # zhe -- neutral tone, no tone mark
         self.assertEqual(fixed, g2p('她笑着说')[0])
+
+
+class TestJiebaResourceLoaderRepair(unittest.TestCase):
+    """The setuptools 81-83 window, which jieba's own ImportError guard misses.
+
+    Simulated rather than measured against a real setuptools, so that the test says the
+    same thing on every runner regardless of what version happens to be installed.
+    """
+
+    def _fake_pkg_resources(self, with_resource_stream):
+        mod = types.ModuleType('pkg_resources')
+        if with_resource_stream:
+            mod.resource_stream = lambda *a: None
+        return {'pkg_resources': mod}
+
+    def test_no_pkg_resources_needs_no_repair(self):
+        # setuptools >= 84: the module is gone, so jieba's own fallback already works.
+        with mock.patch.dict(sys.modules, {'pkg_resources': None}):
+            self.assertFalse(chinese.repair_jieba_resource_loader())
+
+    def test_working_pkg_resources_needs_no_repair(self):
+        # setuptools < 81: resource_stream is present, jieba's normal path works.
+        with mock.patch.dict(sys.modules, self._fake_pkg_resources(True)):
+            self.assertFalse(chinese.repair_jieba_resource_loader())
+
+    def test_broken_pkg_resources_is_repaired(self):
+        try:
+            import jieba
+        except ImportError:
+            self.skipTest('jieba not installed')
+        original = jieba.get_module_res
+        try:
+            with mock.patch.dict(sys.modules, self._fake_pkg_resources(False)):
+                self.assertTrue(chinese.repair_jieba_resource_loader())
+            self.assertIsNot(jieba.get_module_res, original)
+            # The replacement must actually open jieba's dictionary, not merely exist.
+            with jieba.get_module_res('dict.txt') as handle:
+                self.assertTrue(handle.read(1))
+        finally:
+            jieba.get_module_res = original
 
 
 if __name__ == '__main__':
