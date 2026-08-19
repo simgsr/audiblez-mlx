@@ -27,8 +27,7 @@ from pick import pick
 
 from audiblez import DEFAULT_OUTPUT_FOLDER
 from audiblez import chinese
-from audiblez.backends import (DEFAULT_MODEL, default_lang_code, get_pipeline,
-                               initial_chars_per_sec, resolve_backend)
+from audiblez.backends import get_pipeline, initial_chars_per_sec, resolve_backend
 
 sample_rate = 24000
 
@@ -79,8 +78,7 @@ def set_espeak_library():
 
 def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FOLDER,
          max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
-         backend='auto', lang_code=None, repo_id=None, model=DEFAULT_MODEL,
-         temperature=None, top_p=None, seed=None):
+         backend='auto', lang_code=None, repo_id=None):
     if post_event: post_event('CORE_STARTED')
     chinese.reset_notice()  # the GUI stays open across books; each run gets its own notice
     load_spacy()
@@ -121,7 +119,7 @@ def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FO
         # Only characters actually sent to the model, which is what the rate must be based on:
         # chapters skipped because their .wav already exists cost no time.
         synthesized_chars=0,
-        chars_per_sec=initial_chars_per_sec(backend, lang_code or voice[:1], model),
+        chars_per_sec=initial_chars_per_sec(backend, lang_code or voice[:1]),
         start_time=time.time())
     print('Started at:', time.strftime('%H:%M:%S'))
     print(f'Total characters: {stats.total_chars:,}')
@@ -129,11 +127,9 @@ def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FO
     eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
     print(f'Estimated time remaining (assuming {stats.chars_per_sec} chars/sec): {eta}')
     set_espeak_library()
-    # Kokoro encodes the language in the voice name ('af_sky' -> 'a'); Qwen speakers do not.
-    lang_code = lang_code or default_lang_code(voice, model)
-    print(f'Using the {resolved_backend} backend with the {model} model.')
-    pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id,
-                            model=model, temperature=temperature, top_p=top_p, seed=seed)
+    lang_code = lang_code or voice[0]  # a for american or b for british etc.
+    print(f'Using the {resolved_backend} backend.')
+    pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id)
 
     chapter_wav_files = []
     chapter_titles = {}
@@ -262,9 +258,9 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
     text = chinese.normalize(text, lang_code, notify=print)
     doc = nlp(text)
 
-    # Tuple membership, not `in 'ab'`: the substring form also matched '' and 'ab'.
-    # Anything else -- other Kokoro languages, and every Qwen language name -- gets the
-    # manual split, which autoregressive models want anyway to stay inside max_tokens.
+    # Tuple membership, not `in 'ab'`: the substring form also matched '' and 'ab', so a
+    # missing language code silently took the English path and skipped the long-sentence
+    # split that every other language depends on.
     if lang_code in ('a', 'b'):
         sentences = [s.text for s in doc.sents]
     else:
@@ -295,12 +291,10 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
 
 
 def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False,
-             backend='auto', lang_code=None, repo_id=None, model=DEFAULT_MODEL,
-             temperature=None, top_p=None, seed=None):
-    lang_code = lang_code or default_lang_code(voice, model)
+             backend='auto', lang_code=None, repo_id=None):
+    lang_code = lang_code or voice[:1]
     set_espeak_library()
-    pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id,
-                            model=model, temperature=temperature, top_p=top_p, seed=seed)
+    pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id)
     load_spacy()
     audio_segments = gen_audio_segments(pipeline, text, voice=voice, speed=speed, lang_code=lang_code)
     final_audio = np.concatenate(audio_segments)

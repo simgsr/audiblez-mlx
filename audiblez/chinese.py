@@ -37,12 +37,12 @@ import warnings
 # (軟體 -> 软件, 計程車 -> 出租车). That changes the author's words, not just their script.
 OPENCC_CONFIG = 'tw2s'
 
-# Language codes that mean Chinese: Kokoro's letter, and Qwen's full name.
-CHINESE_LANG_CODES = frozenset({'z', 'chinese'})
+# Kokoro's language letter for Chinese.
+CHINESE_LANG_CODES = frozenset({'z'})
 
-# Codes that name no language at all. Qwen speaker names carry none, so a Qwen run without
-# an explicit --lang arrives here as 'auto' and the text has to speak for itself.
-UNKNOWN_LANG_CODES = frozenset({'auto', ''})
+# Codes that name no language at all. A caller that passes none at all arrives here, and
+# the text has to speak for itself.
+UNKNOWN_LANG_CODES = frozenset({''})
 
 _HAN_RE = re.compile(r'[一-鿿㐀-䶿]')
 # Kana and hangul mark a document as Japanese or Korean. Both scripts embed Han characters
@@ -140,8 +140,8 @@ def wants_simplification(lang_code, text):
     """Whether `text` should be converted before being phonemized as `lang_code`.
 
     An explicit Chinese language code is enough on its own. When the caller named no
-    language the text has to look Chinese, so that a Japanese or Korean book -- which also
-    reaches synthesis with lang_code 'auto' -- is left alone.
+    language at all the text has to look Chinese, so that a Japanese or Korean book is
+    left alone.
     """
     code = str(lang_code or '').lower()
     if code in CHINESE_LANG_CODES:

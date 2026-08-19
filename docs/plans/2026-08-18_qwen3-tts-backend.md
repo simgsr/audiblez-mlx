@@ -2,9 +2,25 @@
 
 Date: 2026-08-18
 Branch: `main`
-Status: **implemented** — steps 1-7 landed, except 5g (`instruct`, deliberately deferred).
-Open question 1 (is the quality actually better?) is still unanswered and is the only
-thing gating whether the model is worth using; the plumbing does not depend on it.
+Status: **reverted 2026-08-19.** Implemented, used, and then removed along with the whole
+model registry it introduced; the project is Kokoro-only again. Kept as a design record so
+the next person to consider Qwen3-TTS can start from the measurements rather than repeat
+them.
+
+Why it was dropped, in the order the problems actually mattered:
+
+1. **Too slow.** 62 chars/sec against Kokoro's 666 in English — a 500k-character novel goes
+   from ~13 minutes to ~2.2 hours. This alone decided it.
+2. **Too few voices.** 9 speakers, of which **2** are English, against Kokoro's 54/28. The
+   opt-in model was weakest exactly where most books are.
+3. **Tone and pacing drift.** It samples, so identical text came back at different lengths
+   and deliveries. Seeding made runs reproducible and `top_p` narrowed the spread (see open
+   question 5 below), but neither made the delivery itself pleasant to listen to.
+
+The sampling controls added to tame item 3 (`--temperature`, `--top-p`, `--seed`) went with
+it: Kokoro is deterministic and ignores all three, so nothing was left for them to do.
+
+Everything below is the original plan, left as written.
 
 ## Goal & scope
 

@@ -38,24 +38,24 @@ class TestToSimplified(unittest.TestCase):
 
 class TestWantsSimplification(unittest.TestCase):
     def test_chinese_language_codes(self):
-        for code in ('z', 'Z', 'chinese'):
+        for code in ('z', 'Z'):
             self.assertTrue(chinese.wants_simplification(code, TRADITIONAL), code)
 
     def test_other_languages_are_left_alone(self):
         # Japanese kanji are shinjitai, not Chinese traditional characters: t2s would be
         # rewriting a script it does not apply to.
-        for code in ('a', 'b', 'j', 'japanese', 'korean'):
+        for code in ('a', 'b', 'j'):
             self.assertFalse(chinese.wants_simplification(code, TRADITIONAL), code)
 
     def test_unknown_language_falls_back_to_the_text(self):
-        # Qwen speaker names carry no language, so a run without --lang arrives as 'auto'.
-        self.assertTrue(chinese.wants_simplification('auto', TRADITIONAL))
+        # A caller that names no language at all: the text has to speak for itself.
         self.assertTrue(chinese.wants_simplification(None, TRADITIONAL))
-        self.assertFalse(chinese.wants_simplification('auto', 'Hello, world.'))
+        self.assertTrue(chinese.wants_simplification('', TRADITIONAL))
+        self.assertFalse(chinese.wants_simplification(None, 'Hello, world.'))
 
     def test_unknown_language_skips_japanese_and_korean(self):
-        self.assertFalse(chinese.wants_simplification('auto', 'これは日本語の文章です。'))
-        self.assertFalse(chinese.wants_simplification('auto', '한국어 문장 漢字 포함.'))
+        self.assertFalse(chinese.wants_simplification(None, 'これは日本語の文章です。'))
+        self.assertFalse(chinese.wants_simplification(None, '한국어 문장 漢字 포함.'))
 
 
 class TestNormalize(unittest.TestCase):
