@@ -293,7 +293,9 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
 
 def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False,
              backend='auto', lang_code=None, repo_id=None):
-    lang_code = lang_code or voice[:1]
+    # Not voice[:1]: that reads 'zh-TW-HsiaoChenNeural' as 'z', which sends a Taiwan voice
+    # -- one that reads traditional script natively -- down the simplify-first path.
+    lang_code = lang_code_for(voice, lang_code)
     set_espeak_library()
     pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id)
     load_spacy()

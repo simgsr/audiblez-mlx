@@ -384,6 +384,49 @@ class ConcatListTest(unittest.TestCase):
         self.assertIn(r"'\''", content)
 
 
+class GenTextLangCodeTest(unittest.TestCase):
+    """gen_text has to resolve the language the same way main() does.
+
+    It used to take voice[:1], which reads 'zh-TW-HsiaoChenNeural' as Kokoro's 'z' -- so a
+    Taiwan voice, which reads traditional script natively, got its text simplified first.
+    """
+
+    def gen_text_lang_code(self, voice, lang_code=None):
+        """The lang_code gen_text hands to the pipeline and to gen_audio_segments."""
+        from audiblez import core
+        seen = {}
+
+        def fake_get_pipeline(voice, lang_code=None, backend='auto', repo_id=None):
+            seen['pipeline'] = lang_code
+            return mock.Mock()
+
+        def fake_gen_audio_segments(pipeline, text, voice, speed, **kwargs):
+            seen['segments'] = kwargs.get('lang_code')
+            return [np.zeros(4, dtype='float32')]
+
+        with mock.patch.object(core, 'get_pipeline', side_effect=fake_get_pipeline), \
+             mock.patch.object(core, 'gen_audio_segments', side_effect=fake_gen_audio_segments), \
+             mock.patch.object(core, 'set_espeak_library'), \
+             mock.patch.object(core, 'load_spacy'), \
+             mock.patch.object(core.soundfile, 'write'):
+            core.gen_text('hello', voice=voice, lang_code=lang_code, output_file='x.wav')
+        self.assertEqual(seen['pipeline'], seen['segments'],
+                         'the pipeline and the text normalizer must agree on the language')
+        return seen['pipeline']
+
+    def test_edge_voice_keeps_its_full_locale(self):
+        self.assertEqual(self.gen_text_lang_code('zh-TW-HsiaoChenNeural'), 'zh-TW')
+        self.assertEqual(self.gen_text_lang_code('zh-HK-HiuMaanNeural'), 'zh-HK')
+        self.assertEqual(self.gen_text_lang_code('en-US-AriaNeural'), 'en-US')
+
+    def test_kokoro_voice_still_uses_its_first_letter(self):
+        self.assertEqual(self.gen_text_lang_code('af_sky'), 'a')
+        self.assertEqual(self.gen_text_lang_code('zf_xiaoxiao'), 'z')
+
+    def test_explicit_lang_code_wins(self):
+        self.assertEqual(self.gen_text_lang_code('/voices/custom.pt', lang_code='j'), 'j')
+
+
 class SafeFilenameTest(unittest.TestCase):
     def test_blended_voice_is_safe(self):
         self.assertEqual(safe_filename_part('af_heart,af_bella'), 'af_heart_af_bella')
