@@ -202,10 +202,24 @@ class FakeEdgeTTS:
         yield {'type': 'audio', 'data': self.mp3_bytes}
 
 
+class FakeNoAudioReceived(Exception):
+    """Stands in for edge_tts.exceptions.NoAudioReceived.
+
+    Defined here rather than imported from edge_tts: it is an optional extra that the CI
+    jobs do not install, so importing the real class made these tests error there.
+    _is_no_audio resolves the class through sys.modules, so the stand-in is what it finds.
+    """
+
+
 def fake_edge_tts_module(fake):
     pkg = types.ModuleType('edge_tts')
     pkg.Communicate = fake.Communicate
-    return {'edge_tts': pkg}
+    # _is_no_audio does `from edge_tts.exceptions import NoAudioReceived`, so the submodule
+    # has to be registered too, not just hung off the package.
+    exceptions = types.ModuleType('edge_tts.exceptions')
+    exceptions.NoAudioReceived = FakeNoAudioReceived
+    pkg.exceptions = exceptions
+    return {'edge_tts': pkg, 'edge_tts.exceptions': exceptions}
 
 
 def make_mp3():
@@ -350,16 +364,14 @@ class EdgeRetryTest(unittest.TestCase):
     def test_no_audio_received_is_retried_then_succeeds(self):
         # The reported crash: '②"。' raised NoAudioReceived three times mid-book and read
         # fine moments later. It is speakable -- the service was throttling.
-        from edge_tts.exceptions import NoAudioReceived
-        out, fake = self.call([NoAudioReceived('no audio'), make_mp3()], text='②"。')
+        out, fake = self.call([FakeNoAudioReceived('no audio'), make_mp3()], text='②"。')
         self.assertEqual(len(out), 1)
         self.assertEqual(len(fake.calls), 2)
 
     def test_persistent_no_audio_skips_rather_than_killing_the_book(self):
         # However often the service says "no audio", it is never a reason to lose the
         # finished chapters -- that is what turned a throttled fragment into a dead run.
-        from edge_tts.exceptions import NoAudioReceived
-        out, fake = self.call([NoAudioReceived('no audio')] * backends.EDGE_ATTEMPTS,
+        out, fake = self.call([FakeNoAudioReceived('no audio')] * backends.EDGE_ATTEMPTS,
                               text='②"。')
         self.assertEqual(out, [])
         self.assertEqual(len(fake.calls), backends.EDGE_ATTEMPTS)
