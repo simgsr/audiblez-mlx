@@ -66,17 +66,20 @@ _EDGE_VOICE_RE = re.compile(r'^[a-z]{2}-[A-Z]{2}-')
 # languages -- or all 16 Edge locales, ~50 voices -- into one dropdown, burying the handful
 # anyone actually narrates in. The rest stay one click away.
 DEFAULT_LANGUAGES = frozenset({'a', 'b', 'z'})   # Kokoro: american, british, chinese
-DEFAULT_LOCALE_PREFIXES = ('en-', 'zh-')         # Edge: every English and Chinese locale
+# Named one by one rather than by 'en-'/'zh-' prefix: the prefix form also ticked en-AU,
+# en-CA, en-IN and zh-HK, which is more choice than the dropdown wants by default. The
+# remaining locales are still offered, just unticked.
+DEFAULT_LOCALES = frozenset({'en-US', 'en-GB', 'zh-CN', 'zh-TW'})
 
 
 def is_default_language(code):
-    """True for the English and Chinese codes, in either naming scheme.
+    """True for the codes ticked on startup, in either naming scheme.
 
-    Kokoro codes are single letters and Edge codes are 'en-US'-shaped, so one predicate
-    covers both: no single-letter code can start with 'en-' or 'zh-', and no locale is a
-    single letter. The caller therefore does not need to know which backend is selected.
+    Kokoro codes are single letters and Edge codes are 'en-US'-shaped, and the two sets
+    cannot collide, so one predicate covers both: the caller does not need to know which
+    backend is selected.
     """
-    return code in DEFAULT_LANGUAGES or str(code).startswith(DEFAULT_LOCALE_PREFIXES)
+    return code in DEFAULT_LANGUAGES or code in DEFAULT_LOCALES
 
 
 def default_languages(codes):

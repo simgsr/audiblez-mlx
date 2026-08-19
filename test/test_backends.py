@@ -8,8 +8,8 @@ import numpy as np
 from audiblez import backends
 from audiblez.backends import get_pipeline, mlx_available, resolve_backend
 from audiblez.core import safe_filename_part
-from audiblez.voices import (default_languages, edge_voices, is_default_language,
-                             lang_code_for, voices)
+from audiblez.voices import (DEFAULT_LANGUAGES, DEFAULT_LOCALES, default_languages,
+                             edge_voices, is_default_language, lang_code_for, voices)
 
 
 class FakeResult:
@@ -573,14 +573,19 @@ class DefaultLanguagesTest(unittest.TestCase):
     def test_kokoro_codes_narrow_to_english_and_chinese(self):
         self.assertEqual(default_languages(list(voices.keys())), {'a', 'b', 'z'})
 
-    def test_edge_locales_narrow_to_english_and_chinese(self):
+    def test_edge_locales_narrow_to_the_four_wanted(self):
         chosen = default_languages(list(edge_voices.keys()))
-        self.assertEqual(chosen, {'en-US', 'en-GB', 'en-AU', 'en-CA', 'en-IN',
-                                  'zh-CN', 'zh-TW', 'zh-HK'})
+        self.assertEqual(chosen, {'en-US', 'en-GB', 'zh-CN', 'zh-TW'})
 
     def test_other_languages_are_left_unticked(self):
         for code in ('e', 'f', 'h', 'i', 'j', 'p', 'ja-JP', 'de-DE', 'pt-BR', 'hi-IN'):
             self.assertFalse(is_default_language(code), f'{code} should start unticked')
+
+    def test_secondary_english_and_chinese_locales_are_unticked(self):
+        # Ticked by the earlier 'en-'/'zh-' prefix rule; deliberately not any more.
+        for code in ('en-AU', 'en-CA', 'en-IN', 'zh-HK'):
+            self.assertFalse(is_default_language(code), f'{code} should start unticked')
+            self.assertIn(code, edge_voices, f'{code} must still be offered')
 
     def test_every_offered_language_is_still_available(self):
         # Narrowing the ticks must not narrow the list itself: the others are one click away.
@@ -592,10 +597,13 @@ class DefaultLanguagesTest(unittest.TestCase):
         # An empty tick set would mean an empty voice dropdown, which is worse than noise.
         self.assertEqual(default_languages(['q', 'x']), {'q', 'x'})
 
-    def test_hindi_locale_is_not_confused_with_english_india(self):
-        # 'hi-IN' and 'en-IN' share a country; only the language part may decide.
-        self.assertTrue(is_default_language('en-IN'))
-        self.assertFalse(is_default_language('hi-IN'))
+    def test_the_two_naming_schemes_cannot_collide(self):
+        # One predicate serves both only because no Kokoro letter is a locale and vice
+        # versa; a single-letter code must never match a locale entry.
+        for letter in voices:
+            self.assertNotIn(letter, DEFAULT_LOCALES)
+        for locale in edge_voices:
+            self.assertNotIn(locale, DEFAULT_LANGUAGES)
 
 
 class SafeFilenameTest(unittest.TestCase):
