@@ -58,6 +58,26 @@ class TestWantsSimplification(unittest.TestCase):
         self.assertFalse(chinese.wants_simplification(None, '한국어 문장 漢字 포함.'))
 
 
+class TestEdgeLocales(unittest.TestCase):
+    """The Edge backend: zh-CN behaves like Kokoro's 'z', zh-TW/zh-HK read traditional natively."""
+
+    def test_zh_cn_converts_like_kokoro(self):
+        for code in ('zh-CN', 'zh-cn'):
+            self.assertTrue(chinese.wants_simplification(code, TRADITIONAL), code)
+
+    def test_zh_tw_and_zh_hk_do_not_convert(self):
+        for code in ('zh-TW', 'zh-HK', 'zh-tw', 'zh-hk'):
+            self.assertFalse(chinese.wants_simplification(code, TRADITIONAL), code)
+
+    def test_normalize_leaves_traditional_alone_for_zh_tw(self):
+        chinese.reset_notice()
+        self.assertEqual(chinese.normalize(TRADITIONAL, 'zh-TW'), TRADITIONAL)
+
+    def test_normalize_converts_for_zh_cn(self):
+        chinese.reset_notice()
+        self.assertEqual(chinese.normalize(TRADITIONAL, 'zh-CN'), SIMPLIFIED)
+
+
 class TestNormalize(unittest.TestCase):
     def setUp(self):
         chinese.reset_notice()

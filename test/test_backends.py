@@ -8,6 +8,7 @@ import numpy as np
 from audiblez import backends
 from audiblez.backends import get_pipeline, mlx_available, resolve_backend
 from audiblez.core import safe_filename_part
+from audiblez.voices import lang_code_for
 
 
 class FakeResult:
@@ -43,6 +44,7 @@ class ResolveBackendTest(unittest.TestCase):
     def test_explicit_backends_pass_through(self):
         self.assertEqual(resolve_backend('torch'), 'torch')
         self.assertEqual(resolve_backend('mlx'), 'mlx')
+        self.assertEqual(resolve_backend('edge'), 'edge')
 
     def test_unknown_backend_is_rejected(self):
         with self.assertRaises(ValueError) as ctx:
@@ -178,6 +180,129 @@ class GetPipelineTest(unittest.TestCase):
                  mock.patch.object(backends, 'set_espeak_data_path', return_value='/data'):
                 pipeline = get_pipeline('/voices/custom.pt', lang_code='b', backend='mlx')
         self.assertEqual(pipeline.lang_code, 'b')
+
+
+class FakeEdgeTTS:
+    """Stands in for the edge_tts package, recording how Communicate was called.
+
+    stream() yields one audio chunk holding `mp3_bytes` -- a real MP3, so the pipeline's
+    soundfile decode is exercised rather than mocked away.
+    """
+
+    def __init__(self, mp3_bytes):
+        self.mp3_bytes = mp3_bytes
+        self.calls = []
+
+    def Communicate(self, text, voice, rate=None, **kwargs):
+        self.calls.append(dict(text=text, voice=voice, rate=rate, **kwargs))
+        return self
+
+    async def stream(self):
+        yield {'type': 'audio', 'data': self.mp3_bytes}
+
+
+def fake_edge_tts_module(fake):
+    pkg = types.ModuleType('edge_tts')
+    pkg.Communicate = fake.Communicate
+    return {'edge_tts': pkg}
+
+
+def make_mp3():
+    import io
+    import numpy as np
+    import soundfile
+    buf = io.BytesIO()
+    soundfile.write(buf, np.zeros(1000, dtype=np.float32), 24000, format='MP3')
+    return buf.getvalue()
+
+
+class EdgePipelineTest(unittest.TestCase):
+    def build(self, lang_code='zh-TW'):
+        fake = FakeEdgeTTS(make_mp3())
+        pipeline = backends.EdgePipeline(lang_code)
+        return pipeline, fake
+
+    def run_pipeline(self, pipeline, fake, *args, **kwargs):
+        # The pipeline imports edge_tts inside __call__, so the fake must be in
+        # sys.modules for the call itself, not just for construction.
+        with mock.patch.dict(sys.modules, fake_edge_tts_module(fake)):
+            return list(pipeline(*args, **kwargs))
+
+    def test_yields_kokoro_shaped_triples_with_numpy_audio(self):
+        pipeline, fake = self.build()
+        out = self.run_pipeline(pipeline, fake, '你好。', voice='zh-TW-HsiaoChenNeural', speed=1.0)
+        self.assertEqual(len(out), 1)
+        for graphemes, phonemes, audio in out:
+            self.assertIsNone(graphemes)
+            self.assertIsNone(phonemes)
+            self.assertIsInstance(audio, np.ndarray)
+        # gen_audio_segments concatenates these, so they must survive np.concatenate
+        self.assertGreater(len(np.concatenate([a for _, _, a in out])), 0)
+
+    def test_maps_speed_to_rate(self):
+        pipeline, fake = self.build()
+        self.run_pipeline(pipeline, fake, 'Hello.', voice='en-US-AriaNeural', speed=1.5)
+        self.run_pipeline(pipeline, fake, 'Hello.', voice='en-US-AriaNeural', speed=0.5)
+        self.run_pipeline(pipeline, fake, 'Hello.', voice='en-US-AriaNeural', speed=1.0)
+        self.assertEqual([c['rate'] for c in fake.calls], ['+50%', '-50%', '+0%'])
+
+    def test_passes_text_and_voice_through(self):
+        pipeline, fake = self.build()
+        self.run_pipeline(pipeline, fake, 'Hello.', voice='en-US-AriaNeural', speed=1.0)
+        self.assertEqual(fake.calls[0]['text'], 'Hello.')
+        self.assertEqual(fake.calls[0]['voice'], 'en-US-AriaNeural')
+
+    def test_ignores_split_pattern(self):
+        # edge-tts needs no sentence-level split pattern; the argument must not explode.
+        pipeline, fake = self.build()
+        out = self.run_pipeline(pipeline, fake, 'Hello.', voice='en-US-AriaNeural',
+                                speed=1.0, split_pattern=r'\n\n\n')
+        self.assertEqual(len(out), 1)
+
+
+class EdgeAvailableTest(unittest.TestCase):
+    def test_true_when_edge_tts_installed(self):
+        with mock.patch.dict(sys.modules, {'edge_tts': types.ModuleType('edge_tts')}):
+            self.assertTrue(backends.edge_available())
+
+    def test_false_when_not_installed(self):
+        with mock.patch.dict(sys.modules, {'edge_tts': None}):
+            self.assertFalse(backends.edge_available())
+
+
+class LangCodeForTest(unittest.TestCase):
+    def test_edge_voice_uses_its_locale(self):
+        self.assertEqual(lang_code_for('zh-TW-HsiaoChenNeural'), 'zh-TW')
+        self.assertEqual(lang_code_for('zh-HK-HiuMaanNeural'), 'zh-HK')
+        self.assertEqual(lang_code_for('en-US-AriaNeural'), 'en-US')
+
+    def test_kokoro_voice_uses_first_letter(self):
+        self.assertEqual(lang_code_for('af_sky'), 'a')
+        self.assertEqual(lang_code_for('zf_xiaobei'), 'z')
+
+    def test_explicit_code_wins(self):
+        self.assertEqual(lang_code_for('af_sky', 'b'), 'b')
+        self.assertEqual(lang_code_for('zh-TW-HsiaoChenNeural', 'z'), 'z')
+
+
+class EdgeGetPipelineTest(unittest.TestCase):
+    def test_edge_backend_rejects_a_kokoro_voice(self):
+        with mock.patch.object(backends, 'edge_available', return_value=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                get_pipeline('af_sky', backend='edge')
+        self.assertIn('not an Edge TTS voice', str(ctx.exception))
+
+    def test_edge_backend_without_package_explains_the_extra(self):
+        with mock.patch.object(backends, 'edge_available', return_value=False):
+            with self.assertRaises(RuntimeError) as ctx:
+                get_pipeline('zh-TW-HsiaoChenNeural', backend='edge')
+        self.assertIn('.[edge]', str(ctx.exception))
+
+    def test_edge_backend_returns_an_edge_pipeline(self):
+        with mock.patch.object(backends, 'edge_available', return_value=True):
+            pipeline = get_pipeline('zh-TW-HsiaoChenNeural', backend='edge')
+        self.assertIsInstance(pipeline, backends.EdgePipeline)
+        self.assertEqual(pipeline.lang_code, 'zh-TW')
 
 
 class MeasuredEtaTest(unittest.TestCase):

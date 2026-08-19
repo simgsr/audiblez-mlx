@@ -17,8 +17,8 @@ from tempfile import NamedTemporaryFile
 from pathlib import Path
 
 from audiblez import DEFAULT_OUTPUT_FOLDER
-from audiblez.backends import mlx_available, resolve_backend, torch_available
-from audiblez.voices import voices, flags
+from audiblez.backends import edge_available, mlx_available, resolve_backend, torch_available
+from audiblez.voices import voices, flags, edge_voices, edge_flags, lang_code_for
 
 EVENTS = {
     'CORE_STARTED': NewEvent(),
@@ -274,7 +274,8 @@ class MainWindow(wx.Frame):
         backend_label = wx.StaticText(panel, label="Backend:")
         self.selected_backend = 'auto'
         backend_choices = ['auto'] + (['mlx'] if mlx_available() else []) + \
-                          (['torch'] if torch_available() else [])
+                          (['torch'] if torch_available() else []) + \
+                          (['edge'] if edge_available() else [])
         backend_dropdown = wx.ComboBox(panel, choices=backend_choices, value='auto', style=wx.CB_READONLY)
         backend_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_backend)
         sizer.Add(backend_label, pos=(0, 0), flag=wx.ALL, border=border)
@@ -313,33 +314,35 @@ class MainWindow(wx.Frame):
         engine_radio_panel_sizer.Add(cuda_radio, 0, wx.ALL, 5)
         self.update_device_row()
 
-        # Create a list of voices with flags
-        flag_and_voice_list = []
-        for code, l in voices.items():
-            for v in l:
-                flag_and_voice_list.append(f'{flags[code]} {v}')
+        # Languages: multi-select, so the voice dropdown only shows the languages you care
+        # about. The list depends on the backend (Kokoro codes vs Edge locales).
+        language_label = wx.StaticText(panel, label="Languages:")
+        self.language_listbox = wx.CheckListBox(panel, size=(200, 100))
+        self.language_listbox.Bind(wx.EVT_CHECKLISTBOX, self.on_select_languages)
+        sizer.Add(language_label, pos=(3, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.language_listbox, pos=(3, 1), flag=wx.ALL | wx.EXPAND, border=border)
 
         voice_label = wx.StaticText(panel, label="Voice:")
-        default_voice = flag_and_voice_list[0]
-        self.selected_voice = default_voice
-        # Editable: a voice can also be a blend ("af_heart,af_bella") or a path to a .pt pack.
-        voice_dropdown = wx.ComboBox(panel, choices=flag_and_voice_list, value=default_voice)
-        voice_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_voice)
-        voice_dropdown.Bind(wx.EVT_TEXT, self.on_select_voice)
-        sizer.Add(voice_label, pos=(3, 0), flag=wx.ALL, border=border)
-        sizer.Add(voice_dropdown, pos=(3, 1), flag=wx.ALL | wx.EXPAND, border=border)
+        self.selected_voice = ''
+        # Editable: a voice can also be a blend ("af_heart,af_bella"), a path to a .pt
+        # pack, or an Edge voice name typed in full.
+        self.voice_dropdown = wx.ComboBox(panel, choices=[], value='')
+        self.voice_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_voice)
+        self.voice_dropdown.Bind(wx.EVT_TEXT, self.on_select_voice)
+        sizer.Add(voice_label, pos=(4, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.voice_dropdown, pos=(4, 1), flag=wx.ALL | wx.EXPAND, border=border)
 
         voice_note = wx.StaticText(panel, label='Blend voices with commas, or type a path to a .pt voice')
         voice_note.SetForegroundColour(wx.Colour(110, 110, 110))
-        sizer.Add(voice_note, pos=(4, 1), flag=wx.ALL, border=border)
+        sizer.Add(voice_note, pos=(5, 1), flag=wx.ALL, border=border)
 
         # Add dropdown for speed
         speed_label = wx.StaticText(panel, label="Speed:")
         speed_text_input = wx.TextCtrl(panel, value="1.0")
         self.selected_speed = '1.0'
         speed_text_input.Bind(wx.EVT_TEXT, self.on_select_speed)
-        sizer.Add(speed_label, pos=(5, 0), flag=wx.ALL, border=border)
-        sizer.Add(speed_text_input, pos=(5, 1), flag=wx.ALL, border=border)
+        sizer.Add(speed_label, pos=(6, 0), flag=wx.ALL, border=border)
+        sizer.Add(speed_text_input, pos=(6, 1), flag=wx.ALL, border=border)
 
         # Add file dialog selector to select output folder
         output_folder_label = wx.StaticText(panel, label="Output Folder:")
@@ -350,9 +353,11 @@ class MainWindow(wx.Frame):
         # self.output_folder_text_ctrl.SetMinSize((200, -1))
         output_folder_button = wx.Button(panel, label="📂 Select")
         output_folder_button.Bind(wx.EVT_BUTTON, self.open_output_folder_dialog)
-        sizer.Add(output_folder_label, pos=(6, 0), flag=wx.ALL, border=border)
-        sizer.Add(self.output_folder_text_ctrl, pos=(6, 1), flag=wx.ALL | wx.EXPAND, border=border)
-        sizer.Add(output_folder_button, pos=(7, 1), flag=wx.ALL, border=border)
+        sizer.Add(output_folder_label, pos=(7, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.output_folder_text_ctrl, pos=(7, 1), flag=wx.ALL | wx.EXPAND, border=border)
+        sizer.Add(output_folder_button, pos=(8, 1), flag=wx.ALL, border=border)
+
+        self.rebuild_languages()
 
     def create_synthesis_panel(self):
         # Think and identify layout issue with the folling code
@@ -405,12 +410,66 @@ class MainWindow(wx.Frame):
     def on_select_backend(self, event):
         self.selected_backend = event.GetString()
         self.update_device_row()
+        self.rebuild_languages()
 
     def update_device_row(self):
         """The torch device radio is meaningless when MLX will actually run."""
         uses_torch = resolve_backend(self.selected_backend) == 'torch' and torch_available()
         self.device_label.Enable(uses_torch)
         self.device_panel.Enable(uses_torch)
+
+    def languages_for_backend(self, backend):
+        """The language codes offered for a backend: Kokoro codes or Edge locales."""
+        if resolve_backend(backend) == 'edge':
+            return list(edge_voices.keys())
+        return list(voices.keys())
+
+    def language_label(self, backend, code):
+        if resolve_backend(backend) == 'edge':
+            return f'{edge_flags[code]} {code}'
+        return f'{flags[code]} {code}'
+
+    def rebuild_languages(self):
+        """Repopulate the language listbox for the current backend, all checked."""
+        codes = self.languages_for_backend(self.selected_backend)
+        self.language_codes = codes
+        self.language_listbox.SetItems([self.language_label(self.selected_backend, c) for c in codes])
+        for i in range(len(codes)):
+            self.language_listbox.Check(i)
+        self.selected_languages = set(codes)
+        self.rebuild_voice_dropdown()
+
+    def on_select_languages(self, event):
+        self.selected_languages = {self.language_codes[i] for i in range(len(self.language_codes))
+                                   if self.language_listbox.IsChecked(i)}
+        self.rebuild_voice_dropdown()
+
+    def rebuild_voice_dropdown(self):
+        """Rebuild the voice dropdown from the checked languages of the current backend."""
+        resolved = resolve_backend(self.selected_backend)
+        choices = []
+        if resolved == 'edge':
+            for locale in self.language_codes:
+                if locale not in self.selected_languages:
+                    continue
+                for v in edge_voices[locale]:
+                    choices.append(f'{edge_flags[locale]} {v}')
+        else:
+            for code in self.language_codes:
+                if code not in self.selected_languages:
+                    continue
+                for v in voices[code]:
+                    choices.append(f'{flags[code]} {v}')
+        current = self.get_selected_voice()
+        self.voice_dropdown.SetItems(choices)
+        if not choices:
+            self.selected_voice = ''
+            self.voice_dropdown.SetValue('')
+            return
+        # Keep the current voice if it is still offered, else fall back to the first.
+        display = next((c for c in choices if c.split(' ', 1)[1] == current), choices[0])
+        self.selected_voice = display
+        self.voice_dropdown.SetValue(display)
 
     def on_select_speed(self, event):
         speed = float(event.GetString())
@@ -521,7 +580,7 @@ class MainWindow(wx.Frame):
         """Strip the flag emoji the dropdown prepends, tolerating typed-in custom voices."""
         voice = self.selected_voice.strip()
         first, _, rest = voice.partition(' ')
-        if rest and first in flags.values():
+        if rest and (first in flags.values() or first in edge_flags.values()):
             return rest.strip()
         return voice
 
@@ -529,7 +588,7 @@ class MainWindow(wx.Frame):
         return float(self.selected_speed)
 
     def on_preview_chapter(self, event):
-        lang_code = self.get_selected_voice()[0]
+        lang_code = lang_code_for(self.get_selected_voice())
         button = event.GetEventObject()
         button.SetLabel("⏳")
         button.Disable()

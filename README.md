@@ -55,6 +55,16 @@ pip install ".[torch]"
 > installs on Apple Silicon, so a plain `pip install .` elsewhere leaves you with no speech
 > engine at all.
 
+To also get the **Edge backend** — Microsoft's online neural voices, including real
+Cantonese and native traditional-script reading — add the extra:
+
+```bash
+pip install ".[edge]"
+```
+
+Edge needs network at synthesis time and sends the book's text to Microsoft's servers, so
+it is never chosen by `auto`; pick it explicitly with `--backend edge`.
+
 ### Environment variables
 
 Both are optional; they are auto-detected from a Homebrew install and only need setting if
@@ -157,6 +167,32 @@ The first letter is the language code and the second is the gender of the speake
 
 For more detaila about voice quality, check this document: [Kokoro-82M voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md)
 
+### Edge voices (online)
+
+The Edge backend uses Microsoft's neural voices — no model download, but it needs network
+and sends the book's text to Microsoft's servers. Pick one with `--backend edge`:
+
+| Language                  | Voices                                                                                                                                                                                                                                     |
+|---------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 🇺🇸 American English     | `en-US-AriaNeural`, `en-US-JennyNeural`, `en-US-GuyNeural`, `en-US-EmmaNeural`, `en-US-BrianNeural`, `en-US-AndrewNeural`, `en-US-ChristopherNeural`, `en-US-MichelleNeural`                                                               |
+| 🇬🇧 British English      | `en-GB-LibbyNeural`, `en-GB-MaisieNeural`, `en-GB-RyanNeural`, `en-GB-SoniaNeural`, `en-GB-ThomasNeural`                                                                                                                                  |
+| 🇦🇺 Australian English   | `en-AU-NatashaNeural`, `en-AU-WilliamMultilingualNeural`                                                                                                                                                                                   |
+| 🇨🇦 Canadian English     | `en-CA-ClaraNeural`, `en-CA-LiamNeural`                                                                                                                                                                                                    |
+| 🇮🇳 Indian English       | `en-IN-NeerjaNeural`, `en-IN-PrabhatNeural`                                                                                                                                                                                                |
+| 🇨🇳 Mandarin (mainland) | `zh-CN-XiaoxiaoNeural`, `zh-CN-XiaoyiNeural`, `zh-CN-YunjianNeural`, `zh-CN-YunxiNeural`, `zh-CN-YunxiaNeural`, `zh-CN-YunyangNeural`                                                                                                     |
+| 🇹🇼 Mandarin (Taiwan)   | `zh-TW-HsiaoChenNeural`, `zh-TW-HsiaoYuNeural`, `zh-TW-YunJheNeural` — reads traditional script natively                                                                                                                                    |
+| 🇭🇰 Cantonese (Hong Kong) | `zh-HK-HiuGaaiNeural`, `zh-HK-HiuMaanNeural`, `zh-HK-WanLungNeural`                                                                                                                                                                       |
+| 🇪🇸 Spanish              | `es-ES-AlvaroNeural`, `es-ES-ElviraNeural`, `es-ES-XimenaNeural`, `es-MX-DaliaNeural`, `es-MX-JorgeNeural`                                                                                                                               |
+| 🇫🇷 French               | `fr-FR-DeniseNeural`, `fr-FR-EloiseNeural`, `fr-FR-HenriNeural`, `fr-FR-RemyMultilingualNeural`, `fr-FR-VivienneMultilingualNeural`                                                                                                       |
+| 🇩🇪 German               | `de-DE-ConradNeural`, `de-DE-KatjaNeural`, `de-DE-FlorianMultilingualNeural`, `de-DE-SeraphinaMultilingualNeural`                                                                                                                         |
+| 🇮🇹 Italian              | `it-IT-DiegoNeural`, `it-IT-ElsaNeural`, `it-IT-IsabellaNeural`                                                                                                                                                                            |
+| 🇯🇵 Japanese             | `ja-JP-KeitaNeural`, `ja-JP-NanamiNeural`                                                                                                                                                                                                   |
+| 🇧🇷 Brazilian Portuguese | `pt-BR-AntonioNeural`, `pt-BR-FranciscaNeural`, `pt-BR-ThalitaMultilingualNeural`                                                                                                                                                          |
+| 🇮🇳 Hindi                | `hi-IN-MadhurNeural`, `hi-IN-SwaraNeural`                                                                                                                                                                                                   |
+
+This is a curated subset of the ~400-voice catalog; any other Edge voice name works if you
+type it in full.
+
 ### Traditional Chinese
 
 There is no separate traditional-Chinese voice to pick, in this or any other Kokoro build: a
@@ -184,6 +220,10 @@ One real limitation remains: a traditional-script book is narrated in **Mandarin
 ships no Cantonese voice, so a Hong Kong text will be read correctly, character for
 character, but in Mandarin.
 
+The Edge backend lifts both halves of that limitation. A `zh-TW` voice reads traditional
+script natively — the conversion above is skipped for it, and the OpenCC dependency is not
+needed — and `zh-HK` voices are real Cantonese. Use them with `--backend edge`:
+
 ## Choosing a backend
 
 MLX is used automatically on Apple Silicon. Pick an engine explicitly with `--backend`:
@@ -191,6 +231,7 @@ MLX is used automatically on Apple Silicon. Pick an engine explicitly with `--ba
 ```
 audiblez book.epub -v af_sky --backend mlx     # force MLX (Apple Silicon only)
 audiblez book.epub -v af_sky --backend torch   # force Torch (needs the [torch] extra)
+audiblez book.epub -v zh-TW-HsiaoChenNeural --backend edge   # Microsoft's online TTS (needs the [edge] extra + network)
 audiblez book.epub -v af_sky --backend auto    # default: MLX when available, else Torch
 ```
 
@@ -264,12 +305,14 @@ options:
   -o FOLDER, --output FOLDER
                         Output folder for the audiobook and intermediate files
                         (default: audiobooks/, created if missing)
-  -b {auto,torch,mlx}, --backend {auto,torch,mlx}
+  -b {auto,torch,mlx,edge}, --backend {auto,torch,mlx,edge}
                         TTS engine: mlx is Apple-Silicon only and faster, auto
-                        picks it when available
-  --lang CODE           Kokoro language code (a, b, e, f, h, i, j, p, z).
-                        Defaults to the first letter of the voice name; set it
-                        when using a custom .pt voice
+                        picks it when available; edge is Microsoft's online TTS
+                        (needs network)
+  --lang CODE           Language code: Kokoro (a, b, e, f, h, i, j, p, z) or an
+                        Edge locale (en-US, zh-TW, zh-HK, ...). Defaults to the
+                        first letter of the voice name, or the locale for an Edge
+                        voice; set it when using a custom .pt voice
   --repo-id REPO        Hugging Face model repo to use instead of the backend
                         default
 
@@ -282,7 +325,7 @@ to run GUI just run:
 
 ## Voices beyond the built-in list
 
-Kokoro's `load_voice` accepts more than the names above, and both backends pass it through:
+Kokoro's `load_voice` accepts more than the names above, and both Kokoro backends pass it through:
 
 ```
 audiblez book.epub -v af_heart,af_bella          # blend two voices (averaged)

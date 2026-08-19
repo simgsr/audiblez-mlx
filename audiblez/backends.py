@@ -13,7 +13,9 @@ import platform
 from glob import glob
 from pathlib import Path
 
-BACKENDS = ('auto', 'torch', 'mlx')
+from audiblez.voices import is_edge_voice, lang_code_for
+
+BACKENDS = ('auto', 'torch', 'mlx', 'edge')
 
 DEFAULT_REPOS = {
     'torch': 'hexgrad/Kokoro-82M',
@@ -26,6 +28,7 @@ CHARS_PER_SEC_GUESS = {
     'mlx': 900,        # measured ~906 on an M5 Max
     'torch_cuda': 500,
     'torch_cpu': 50,
+    'edge': 150,       # network-bound; conservative, recalibrates within the first chapter
 }
 
 # Per-language overrides. Characters are not equal units of speech: a CJK character carries
@@ -65,6 +68,19 @@ def torch_available():
     return True
 
 
+def edge_available():
+    """True when the edge-tts package is installed.
+
+    Edge is an optional extra like torch: it needs network at synthesis time, so its
+    absence is normal rather than an error.
+    """
+    try:
+        import edge_tts  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def resolve_backend(backend='auto'):
     """Turn 'auto' into a concrete backend name."""
     if backend not in BACKENDS:
@@ -81,8 +97,11 @@ def resolve_backend(backend='auto'):
 
 def initial_chars_per_sec(backend, lang_code=None):
     """Seed value for the time estimate, before real throughput is known."""
-    if resolve_backend(backend) == 'mlx':
+    resolved = resolve_backend(backend)
+    if resolved == 'mlx':
         key = 'mlx'
+    elif resolved == 'edge':
+        key = 'edge'
     else:
         key = 'torch_cpu'
         try:
@@ -160,21 +179,68 @@ class MlxKokoroPipeline:
             yield None, None, np.asarray(result.audio)
 
 
+class EdgePipeline:
+    """Microsoft Edge's online TTS, wearing the pipeline callable signature.
+
+    Yields (graphemes, phonemes, audio) like the Kokoro pipelines do; graphemes and
+    phonemes are None. Audio is decoded from the MP3 edge-tts returns (24kHz, the same
+    rate audiblez writes) to numpy so np.concatenate downstream is unaffected.
+
+    Each __call__ is one network request, run with asyncio.run() -- audiblez's core is
+    synchronous and runs in a plain thread, so there is no running event loop to clash
+    with. split_pattern is accepted and ignored: edge-tts needs no sentence-level split
+    pattern.
+    """
+
+    def __init__(self, lang_code):
+        self.lang_code = lang_code
+
+    def __call__(self, text, voice, speed=1.0, split_pattern=None):
+        import asyncio
+        import io
+        import numpy as np
+        import soundfile
+        import edge_tts
+        rate = f"{int(round((speed - 1) * 100)):+d}%"
+
+        async def synth():
+            communicate = edge_tts.Communicate(text, voice, rate=rate)
+            chunks = []
+            async for chunk in communicate.stream():
+                if chunk['type'] == 'audio':
+                    chunks.append(chunk['data'])
+            return b''.join(chunks)
+
+        mp3 = asyncio.run(synth())
+        audio, _ = soundfile.read(io.BytesIO(mp3), dtype='float32')
+        yield None, None, audio
+
+
 def get_pipeline(voice, lang_code=None, backend='auto', repo_id=None):
     """Build a TTS pipeline callable for `voice`.
 
     lang_code defaults to the first letter of the voice name, which is Kokoro's own
-    convention ('af_sky' -> 'a'). Pass it explicitly for a voice whose name does not
-    carry the language, such as a path to a custom .pt voice pack.
+    convention ('af_sky' -> 'a'); an Edge voice carries its locale instead
+    ('zh-TW-HsiaoChenNeural' -> 'zh-TW'). Pass it explicitly for a voice whose name does
+    not carry the language, such as a path to a custom .pt voice pack.
     """
     resolved = resolve_backend(backend)
-    lang_code = lang_code or voice[0]
+    lang_code = lang_code_for(voice, lang_code)
     if resolved == 'mlx':
         if not mlx_available():
             hint = ('Install it with: pip install mlx-audio "misaki[en]"' if is_apple_silicon()
                     else 'It needs Apple Silicon; use --backend torch on this machine.')
             raise RuntimeError(f'The mlx backend is not available. {hint}')
         return MlxKokoroPipeline(lang_code, repo_id)
+    if resolved == 'edge':
+        if not edge_available():
+            raise RuntimeError(
+                'The edge backend is not installed. Add it with: pip install ".[edge]"')
+        if not is_edge_voice(voice):
+            raise RuntimeError(
+                f'{voice!r} is not an Edge TTS voice. Edge voices look like '
+                "'zh-TW-HsiaoChenNeural'; pick one from the voice list or type a full name.")
+        return EdgePipeline(lang_code)
     if not torch_available():
         raise RuntimeError(
             'The torch backend is not installed. This build ships MLX by default; '

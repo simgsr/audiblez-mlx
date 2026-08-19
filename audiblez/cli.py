@@ -3,7 +3,7 @@ import argparse
 import sys
 
 from audiblez import DEFAULT_OUTPUT_FOLDER
-from audiblez.voices import voices, available_voices_str
+from audiblez.voices import voices, available_voices_str, edge_voices_str
 
 
 def cli_main():
@@ -12,8 +12,10 @@ def cli_main():
               '  audiblez book.epub -l en-us -v af_sky\n\n' +
               'to run GUI just run:\n'
               '  audiblez-ui\n\n' +
-              'available voices:\n' +
-              available_voices_str)
+              'available Kokoro voices:\n' +
+              available_voices_str + '\n\n' +
+              'Edge voices (online, needs network; use --backend edge):\n' +
+              edge_voices_str)
     default_voice = 'af_sky'
     parser = argparse.ArgumentParser(epilog=epilog, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('epub_file_path', help='Path to the epub file')
@@ -26,11 +28,13 @@ def cli_main():
     parser.add_argument('-o', '--output', default=DEFAULT_OUTPUT_FOLDER, metavar='FOLDER',
                         help=f'Output folder for the audiobook and intermediate files '
                              f'(default: {DEFAULT_OUTPUT_FOLDER}/, created if missing)')
-    parser.add_argument('-b', '--backend', default='auto', choices=['auto', 'torch', 'mlx'],
-                        help='TTS engine: mlx is Apple-Silicon only and faster, auto picks it when available')
+    parser.add_argument('-b', '--backend', default='auto', choices=['auto', 'torch', 'mlx', 'edge'],
+                        help='TTS engine: mlx is Apple-Silicon only and faster, auto picks it when available; '
+                             'edge is Microsoft\'s online TTS (needs network)')
     parser.add_argument('--lang', default=None, metavar='CODE',
-                        help='Kokoro language code (a, b, e, f, h, i, j, p, z). Defaults to the first letter '
-                             'of the voice name; set it when using a custom .pt voice')
+                        help='Language code: Kokoro (a, b, e, f, h, i, j, p, z) or an Edge locale '
+                             '(en-US, zh-TW, zh-HK, ...). Defaults to the first letter of the voice name, '
+                             'or the locale for an Edge voice; set it when using a custom .pt voice')
     parser.add_argument('--repo-id', default=None, metavar='REPO',
                         help='Hugging Face model repo to use instead of the backend default')
 

@@ -27,6 +27,12 @@ dependencies = [
 torch = [
     "kokoro (==0.9.4)",
 ]
+# Microsoft Edge's online TTS: high-quality neural voices (incl. real Cantonese and
+# native traditional-script reading) with no model download. Requires network at
+# synthesis time; the book's text is sent to Microsoft's servers.
+edge = [
+    "edge-tts (>=7.2.0)",
+]
 gui = [
     "wxpython (>=4.2)",
     "pillow (>=10.0)",

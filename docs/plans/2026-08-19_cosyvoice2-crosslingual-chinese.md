@@ -2,11 +2,12 @@
 
 Date: 2026-08-19
 Branch: `feat/traditional-chinese`
-Status: **investigated and benchmarked, not implemented.** Everything below rests on
-measurements taken on 2026-08-19 (an M-series Mac); no production code was written. The
-decision is gated on a listening test that has not happened yet — see
-[Open questions](#open-questions). If the answer is no, follow
-[Abort and clean up](#abort-and-clean-up) and delete nothing else.
+Status: **aborted 2026-08-19.** Superseded by the edge-tts backend
+([2026-08-19_edge-tts-backend.md](2026-08-19_edge-tts-backend.md)): real Cantonese, native
+traditional-script reading, and no model downloads. Kept as a design record — the
+measurements and the listening-test gate below are still the right way to revisit this if
+edge-tts ever proves insufficient. Everything below rests on measurements taken on
+2026-08-19 (an M-series Mac); no production code was written.
 
 ## Goal & scope
 

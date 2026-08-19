@@ -28,6 +28,7 @@ from pick import pick
 from audiblez import DEFAULT_OUTPUT_FOLDER
 from audiblez import chinese
 from audiblez.backends import get_pipeline, initial_chars_per_sec, resolve_backend
+from audiblez.voices import lang_code_for
 
 sample_rate = 24000
 
@@ -119,7 +120,7 @@ def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FO
         # Only characters actually sent to the model, which is what the rate must be based on:
         # chapters skipped because their .wav already exists cost no time.
         synthesized_chars=0,
-        chars_per_sec=initial_chars_per_sec(backend, lang_code or voice[:1]),
+        chars_per_sec=initial_chars_per_sec(backend, lang_code_for(voice, lang_code)),
         start_time=time.time())
     print('Started at:', time.strftime('%H:%M:%S'))
     print(f'Total characters: {stats.total_chars:,}')
@@ -127,7 +128,7 @@ def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FO
     eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
     print(f'Estimated time remaining (assuming {stats.chars_per_sec} chars/sec): {eta}')
     set_espeak_library()
-    lang_code = lang_code or voice[0]  # a for american or b for british etc.
+    lang_code = lang_code_for(voice, lang_code)  # 'a' for american, 'zh-TW' for an Edge voice, etc.
     print(f'Using the {resolved_backend} backend.')
     pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id)
 
@@ -253,7 +254,7 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
     nlp = spacy.load('xx_ent_wiki_sm')
     nlp.add_pipe('sentencizer')
     audio_segments = []
-    lang_code = lang_code or voice[0]
+    lang_code = lang_code_for(voice, lang_code)
     # Before sentence splitting, so the segmenter sees the same characters the model will.
     text = chinese.normalize(text, lang_code, notify=print)
     doc = nlp(text)

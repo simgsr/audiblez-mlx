@@ -23,6 +23,10 @@ audio you get is what a Mandarin reader would say when reading the traditional p
 
 The conversion applies to the narration path only. Titles, chapter marks and everything
 else written into the .m4b keep the book's original characters.
+
+The Edge backend changes the picture for two locales: zh-TW and zh-HK voices read
+traditional script natively, so for them the conversion is skipped entirely (see
+wants_simplification). zh-CN behaves like Kokoro's 'z'.
 """
 import os
 import re
@@ -37,8 +41,13 @@ import warnings
 # (軟體 -> 软件, 計程車 -> 出租车). That changes the author's words, not just their script.
 OPENCC_CONFIG = 'tw2s'
 
-# Kokoro's language letter for Chinese.
-CHINESE_LANG_CODES = frozenset({'z'})
+# Kokoro's language letter for Chinese, and the Edge locale for mainland Mandarin. Both
+# front ends are simplified-keyed, so traditional text is converted before them.
+CHINESE_LANG_CODES = frozenset({'z', 'zh-cn'})
+
+# Edge locales whose voices read traditional script natively. Converting would be
+# pointless: a Taiwan or Hong Kong voice already knows 臺灣 and 著.
+TRADITIONAL_NATIVE_LOCALES = frozenset({'zh-tw', 'zh-hk'})
 
 # Codes that name no language at all. A caller that passes none at all arrives here, and
 # the text has to speak for itself.
@@ -139,13 +148,16 @@ def looks_chinese(text):
 def wants_simplification(lang_code, text):
     """Whether `text` should be converted before being phonemized as `lang_code`.
 
-    An explicit Chinese language code is enough on its own. When the caller named no
-    language at all the text has to look Chinese, so that a Japanese or Korean book is
-    left alone.
+    An explicit Chinese language code is enough on its own -- except for the Edge locales
+    whose voices read traditional script natively (zh-TW, zh-HK), which never convert.
+    When the caller named no language at all the text has to look Chinese, so that a
+    Japanese or Korean book is left alone.
     """
     code = str(lang_code or '').lower()
     if code in CHINESE_LANG_CODES:
         return True
+    if code in TRADITIONAL_NATIVE_LOCALES:
+        return False
     if code in UNKNOWN_LANG_CODES:
         return looks_chinese(text)
     return False
