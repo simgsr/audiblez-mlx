@@ -260,6 +260,99 @@ class EdgePipelineTest(unittest.TestCase):
         self.assertEqual(len(out), 1)
 
 
+class ScriptedEdgeTTS:
+    """edge_tts stand-in whose outcome is scripted, one entry per Communicate call.
+
+    An entry is either the bytes to stream back or an exception to raise. Empty bytes
+    reproduce what the real service does for text it finds nothing to say in: it streams no
+    chunk at all and raises nothing.
+    """
+
+    def __init__(self, script=()):
+        self.script = list(script)
+        self.calls = []
+        self._next = b''
+
+    def Communicate(self, text, voice, rate=None, **kwargs):
+        self.calls.append(dict(text=text, voice=voice, rate=rate))
+        self._next = self.script.pop(0) if self.script else b''
+        return self
+
+    async def stream(self):
+        if isinstance(self._next, Exception):
+            raise self._next
+        if self._next:
+            yield {'type': 'audio', 'data': self._next}
+
+
+class EdgeUnspeakableTextTest(unittest.TestCase):
+    """The bug that killed a 15-chapter book 8% in.
+
+    Sentence splitting hands back a bare '\\n' as the last "sentence" of a chapter. edge-tts
+    splits that into zero chunks, then streams nothing and raises nothing, so empty bytes
+    reached soundfile and surfaced as 'Format not recognised'.
+    """
+
+    def run_text(self, text, script=()):
+        fake = ScriptedEdgeTTS(script)
+        pipeline = backends.EdgePipeline('zh-CN')
+        with mock.patch.dict(sys.modules, fake_edge_tts_module(fake)):
+            return list(pipeline(text, voice='zh-CN-XiaoxiaoNeural', speed=1.0)), fake
+
+    def test_bare_newline_is_skipped_without_a_request(self):
+        out, fake = self.run_text('\n')
+        self.assertEqual(out, [])
+        self.assertEqual(fake.calls, [], 'nothing to say means nothing to ask the service')
+
+    def test_punctuation_and_whitespace_only_is_skipped(self):
+        for text in ['「」', '……', '   ', '', '—', '　　']:
+            out, fake = self.run_text(text)
+            self.assertEqual(out, [], f'{text!r} should produce no audio')
+            self.assertEqual(fake.calls, [], f'{text!r} should not be sent')
+
+    def test_real_text_is_still_synthesized(self):
+        out, fake = self.run_text('一九六五年春于美爱荷华城。', script=[make_mp3()])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_speakable_covers_han_kana_latin_and_digits(self):
+        for text in ['你', 'カナ', 'a', '7']:
+            out, fake = self.run_text(text, script=[make_mp3()])
+            self.assertEqual(len(fake.calls), 1, f'{text!r} should be sent')
+
+
+class EdgeRetryTest(unittest.TestCase):
+    """Edge is a network service; one dropped response must not cost a multi-hour book."""
+
+    def call(self, script, text='你好。'):
+        fake = ScriptedEdgeTTS(script)
+        pipeline = backends.EdgePipeline('zh-CN')
+        with mock.patch.dict(sys.modules, fake_edge_tts_module(fake)), \
+             mock.patch.object(backends, 'time'):  # no real backoff in tests
+            return list(pipeline(text, voice='zh-CN-XiaoxiaoNeural', speed=1.0)), fake
+
+    def test_empty_response_is_retried_then_succeeds(self):
+        out, fake = self.call([b'', make_mp3()])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_persistent_silence_skips_the_sentence_rather_than_crashing(self):
+        out, fake = self.call([b''] * backends.EDGE_ATTEMPTS)
+        self.assertEqual(out, [], 'one silent sentence must not lose the finished chapters')
+        self.assertEqual(len(fake.calls), backends.EDGE_ATTEMPTS)
+
+    def test_transient_exception_is_retried(self):
+        out, fake = self.call([RuntimeError('websocket dropped'), make_mp3()])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_persistent_failure_raises_naming_the_text(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self.call([RuntimeError('boom')] * backends.EDGE_ATTEMPTS)
+        self.assertIn(f'after {backends.EDGE_ATTEMPTS} attempts', str(ctx.exception))
+        self.assertIn('你好。', str(ctx.exception))
+
+
 class EdgeAvailableTest(unittest.TestCase):
     def test_true_when_edge_tts_installed(self):
         with mock.patch.dict(sys.modules, {'edge_tts': types.ModuleType('edge_tts')}):

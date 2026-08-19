@@ -10,6 +10,8 @@ and everything downstream of it -- does not need to know which engine is running
 """
 import os
 import platform
+import re
+import time
 from glob import glob
 from pathlib import Path
 
@@ -179,6 +181,20 @@ class MlxKokoroPipeline:
             yield None, None, np.asarray(result.audio)
 
 
+# Text with nothing to pronounce. Sentence splitting hands back bare newlines (the last
+# "sentence" of a chapter is routinely just '\n') and punctuation-only fragments such as
+# '「」', and edge-tts splits those into *zero* chunks: it then streams nothing and raises
+# nothing, so an empty payload reached soundfile, which reported the unhelpful
+# "Format not recognised" and killed the whole book. `\w` covers Han, kana and Latin alike.
+_SPEAKABLE_RE = re.compile(r'\w', re.UNICODE)
+
+# Edge is a network service, and a single dropped or empty response should not cost a
+# multi-hour book. Measured: valid text occasionally comes back with zero audio bytes when
+# requests are issued back to back, and succeeds on a retry moments later.
+EDGE_ATTEMPTS = 3
+EDGE_RETRY_WAIT = 2.0
+
+
 class EdgePipeline:
     """Microsoft Edge's online TTS, wearing the pipeline callable signature.
 
@@ -198,9 +214,13 @@ class EdgePipeline:
     def __call__(self, text, voice, speed=1.0, split_pattern=None):
         import asyncio
         import io
-        import numpy as np
         import soundfile
         import edge_tts
+
+        # Nothing to narrate: yield no segment rather than ask the service to read silence.
+        if not _SPEAKABLE_RE.search(text or ''):
+            return
+
         rate = f"{int(round((speed - 1) * 100)):+d}%"
 
         async def synth():
@@ -211,7 +231,34 @@ class EdgePipeline:
                     chunks.append(chunk['data'])
             return b''.join(chunks)
 
-        mp3 = asyncio.run(synth())
+        excerpt = text.strip()[:40]
+        mp3 = b''
+        for attempt in range(1, EDGE_ATTEMPTS + 1):
+            try:
+                mp3 = asyncio.run(synth())
+            except Exception as e:
+                # A chapter's .wav is only written once the chapter finishes, and finished
+                # chapters are skipped on the next run, so raising costs this chapter and
+                # not the book.
+                if attempt == EDGE_ATTEMPTS:
+                    raise RuntimeError(
+                        f'Edge TTS failed after {EDGE_ATTEMPTS} attempts on {excerpt!r}: '
+                        f'{type(e).__name__}: {e}') from e
+                print(f'Edge TTS attempt {attempt} failed ({type(e).__name__}); retrying...')
+                time.sleep(EDGE_RETRY_WAIT * attempt)
+                continue
+            if mp3:
+                break
+            if attempt < EDGE_ATTEMPTS:
+                print(f'Edge TTS returned no audio (attempt {attempt}); retrying...')
+                time.sleep(EDGE_RETRY_WAIT * attempt)
+
+        if not mp3:
+            # The service took the text and sent nothing back, repeatedly. Dropping one
+            # sentence beats losing every finished chapter to it.
+            print(f'Warning: Edge TTS returned no audio for {excerpt!r}; skipping it.')
+            return
+
         audio, _ = soundfile.read(io.BytesIO(mp3), dtype='float32')
         yield None, None, audio
 
