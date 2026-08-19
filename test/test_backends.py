@@ -274,6 +274,16 @@ class ThroughputSeedTest(unittest.TestCase):
 
 
 class QwenAdapterTest(unittest.TestCase):
+    def setUp(self):
+        # The adapter seeds MLX's PRNG on every call, so exercising it needs an importable
+        # mlx. Production never lacks one -- MlxPipeline only loads where mlx_audio does --
+        # but the Linux CI job has neither, so the fake environment has to supply it or
+        # every call here dies on the import rather than on anything under test. Tests that
+        # assert on seeding layer their own recording stub over this one.
+        patcher = mock.patch.dict(sys.modules, fake_mlx_core([]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def build(self, lang_code='english', temperature=None, top_p=None, seed=None):
         model = FakeQwenModel()
         with mock.patch.dict(sys.modules, fake_mlx_audio(model)), \
