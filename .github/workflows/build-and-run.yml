@@ -9,6 +9,9 @@ jobs:
   # The platform this fork exists for: Apple Silicon, MLX backend, no torch installed.
   macos-mlx:
     runs-on: macos-14  # arm64
+    # A normal run of this job is ~6 minutes. Without a timeout the default is 6 hours, so a
+    # package mirror that stalls instead of failing keeps the job "in progress" all day.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -20,6 +23,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install ffmpeg, espeak-ng
+        timeout-minutes: 20
         run: brew install ffmpeg espeak-ng
       - name: Install
         run: pip install .
@@ -53,6 +57,7 @@ jobs:
   # The portable fallback still has to work: no MLX wheel here, so [torch] is required.
   linux-torch-fallback:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -60,7 +65,19 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install ffmpeg, espeak-ng
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg espeak-ng
+        timeout-minutes: 14
+        run: |
+          # `timeout` around each attempt, not just the step: an unreachable apt mirror hangs
+          # rather than failing, and a hang the step timeout catches leaves no chance to retry.
+          for attempt in 1 2 3; do
+            if timeout 120 sudo apt-get update && \
+               timeout 120 sudo apt-get install -y ffmpeg espeak-ng; then
+              exit 0
+            fi
+            echo "::warning::apt attempt $attempt failed or timed out; retrying in 15s"
+            sleep 15
+          done
+          exit 1
       - name: Install with the torch extra
         run: pip install ".[torch]"
       - name: Confirm the torch backend is selected off Apple Silicon
