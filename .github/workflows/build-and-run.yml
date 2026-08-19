@@ -39,6 +39,7 @@ jobs:
           python test/test_extract_text.py
           python test/test_split_chapters.py
           python test/test_backends.py
+          python test/test_chinese.py
           python test/test_imports.py
       - name: Download test epub
         run: curl -sSL -o book.epub "$TEST_EPUB_URL"
@@ -76,6 +77,7 @@ jobs:
           python test/test_extract_text.py
           python test/test_split_chapters.py
           python test/test_backends.py
+          python test/test_chinese.py
           python test/test_imports.py
       - name: Download test epub
         run: curl -sSL -o book.epub "$TEST_EPUB_URL"

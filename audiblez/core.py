@@ -26,6 +26,7 @@ from ebooklib import epub
 from pick import pick
 
 from audiblez import DEFAULT_OUTPUT_FOLDER
+from audiblez import chinese
 from audiblez.backends import (DEFAULT_MODEL, default_lang_code, get_pipeline,
                                initial_chars_per_sec, resolve_backend)
 
@@ -80,6 +81,7 @@ def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FO
          max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
          backend='auto', lang_code=None, repo_id=None, model=DEFAULT_MODEL):
     if post_event: post_event('CORE_STARTED')
+    chinese.reset_notice()  # the GUI stays open across books; each run gets its own notice
     load_spacy()
     Path(output_folder).mkdir(parents=True, exist_ok=True)
 
@@ -254,8 +256,10 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
     nlp = spacy.load('xx_ent_wiki_sm')
     nlp.add_pipe('sentencizer')
     audio_segments = []
-    doc = nlp(text)
     lang_code = lang_code or voice[0]
+    # Before sentence splitting, so the segmenter sees the same characters the model will.
+    text = chinese.normalize(text, lang_code, notify=print)
+    doc = nlp(text)
 
     # Tuple membership, not `in 'ab'`: the substring form also matched '' and 'ab'.
     # Anything else -- other Kokoro languages, and every Qwen language name -- gets the

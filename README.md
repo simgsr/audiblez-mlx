@@ -161,6 +161,33 @@ The first letter is the language code and the second is the gender of the speake
 
 For more detaila about voice quality, check this document: [Kokoro-82M voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md)
 
+### Traditional Chinese
+
+There is no separate traditional-Chinese voice to pick, in this or any other Kokoro build: a
+voice is a speaker's timbre, and the script a book is printed in is handled before the model
+ever sees the text. What *was* missing is that handling. Kokoro's Chinese front end is jieba
+plus pypinyin, whose dictionaries are keyed on simplified characters, so traditional text fell
+back to character-by-character lookup and lost the two things those dictionaries provide:
+polyphone disambiguation (乾乾淨淨 read as *qián qián jìng jìng* instead of *gān gān jìng
+jìng*) and word segmentation (臺灣的 split as 臺 / 灣的).
+
+The one that hurts most is the aspect particle 著: 她笑著說 is read *xiào **zhù** shuō*
+instead of the neutral-tone *xiào **zhe** shuō*, and that construction turns up in nearly
+every paragraph of a novel.
+
+This fork converts traditional text to simplified before phonemizing it, via OpenCC's `tw2s`
+(chosen over the plainer `t2s` because it is the one that fixes 著 while leaving 著作 and 著名
+alone, and over `tw2sp` because that would also rewrite regional vocabulary — 軟體 into 软件 —
+which changes the author's words rather than their script). Nothing
+is lost in doing so — Mandarin pronunciation does not depend on the script — and the text
+written into the `.m4b` (titles, chapter marks) keeps the book's original characters. It
+happens automatically for any of the `z*` voices, and for `qwen3-tts` when the text is Han
+script without kana or hangul; Japanese and Korean books are never touched.
+
+One real limitation remains: a traditional-script book is narrated in **Mandarin**. Neither
+model ships a Cantonese voice, so a Hong Kong text will be read correctly, character for
+character, but in Mandarin.
+
 ## Choosing a backend
 
 MLX is used automatically on Apple Silicon. Pick an engine explicitly with `--backend`:
