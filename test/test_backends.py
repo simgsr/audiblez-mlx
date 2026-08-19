@@ -8,7 +8,8 @@ import numpy as np
 from audiblez import backends
 from audiblez.backends import get_pipeline, mlx_available, resolve_backend
 from audiblez.core import safe_filename_part
-from audiblez.voices import lang_code_for
+from audiblez.voices import (default_languages, edge_voices, is_default_language,
+                             lang_code_for, voices)
 
 
 class FakeResult:
@@ -548,6 +549,41 @@ class GenTextLangCodeTest(unittest.TestCase):
 
     def test_explicit_lang_code_wins(self):
         self.assertEqual(self.gen_text_lang_code('/voices/custom.pt', lang_code='j'), 'j')
+
+
+class DefaultLanguagesTest(unittest.TestCase):
+    """Which languages the GUI ticks on startup: English and Chinese, not everything.
+
+    Lives here rather than in a UI test because wxPython is an optional extra that CI does
+    not install -- and the rule is pure data, with no widget involved.
+    """
+
+    def test_kokoro_codes_narrow_to_english_and_chinese(self):
+        self.assertEqual(default_languages(list(voices.keys())), {'a', 'b', 'z'})
+
+    def test_edge_locales_narrow_to_english_and_chinese(self):
+        chosen = default_languages(list(edge_voices.keys()))
+        self.assertEqual(chosen, {'en-US', 'en-GB', 'en-AU', 'en-CA', 'en-IN',
+                                  'zh-CN', 'zh-TW', 'zh-HK'})
+
+    def test_other_languages_are_left_unticked(self):
+        for code in ('e', 'f', 'h', 'i', 'j', 'p', 'ja-JP', 'de-DE', 'pt-BR', 'hi-IN'):
+            self.assertFalse(is_default_language(code), f'{code} should start unticked')
+
+    def test_every_offered_language_is_still_available(self):
+        # Narrowing the ticks must not narrow the list itself: the others are one click away.
+        for codes in (list(voices.keys()), list(edge_voices.keys())):
+            self.assertTrue(default_languages(codes).issubset(set(codes)))
+            self.assertLess(len(default_languages(codes)), len(codes))
+
+    def test_unrecognised_codes_fall_back_to_everything(self):
+        # An empty tick set would mean an empty voice dropdown, which is worse than noise.
+        self.assertEqual(default_languages(['q', 'x']), {'q', 'x'})
+
+    def test_hindi_locale_is_not_confused_with_english_india(self):
+        # 'hi-IN' and 'en-IN' share a country; only the language part may decide.
+        self.assertTrue(is_default_language('en-IN'))
+        self.assertFalse(is_default_language('hi-IN'))
 
 
 class SafeFilenameTest(unittest.TestCase):

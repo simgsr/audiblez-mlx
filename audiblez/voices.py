@@ -62,6 +62,32 @@ edge_flags = {
 # blends ('af_heart,af_bella') and .pt paths never match.
 _EDGE_VOICE_RE = re.compile(r'^[a-z]{2}-[A-Z]{2}-')
 
+# Ticked by default in the GUI's language filter. Ticking every language put all 9 Kokoro
+# languages -- or all 16 Edge locales, ~50 voices -- into one dropdown, burying the handful
+# anyone actually narrates in. The rest stay one click away.
+DEFAULT_LANGUAGES = frozenset({'a', 'b', 'z'})   # Kokoro: american, british, chinese
+DEFAULT_LOCALE_PREFIXES = ('en-', 'zh-')         # Edge: every English and Chinese locale
+
+
+def is_default_language(code):
+    """True for the English and Chinese codes, in either naming scheme.
+
+    Kokoro codes are single letters and Edge codes are 'en-US'-shaped, so one predicate
+    covers both: no single-letter code can start with 'en-' or 'zh-', and no locale is a
+    single letter. The caller therefore does not need to know which backend is selected.
+    """
+    return code in DEFAULT_LANGUAGES or str(code).startswith(DEFAULT_LOCALE_PREFIXES)
+
+
+def default_languages(codes):
+    """The subset of `codes` ticked on startup, or all of them if none qualify.
+
+    The fallback matters for a backend whose codes are named some third way: better to
+    open with everything ticked than with an empty voice dropdown.
+    """
+    chosen = {c for c in codes if is_default_language(c)}
+    return chosen or set(codes)
+
 
 def is_edge_voice(voice):
     """True when `voice` names an Edge TTS voice rather than a Kokoro one."""

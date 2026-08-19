@@ -19,7 +19,7 @@ from pathlib import Path
 
 from audiblez import DEFAULT_OUTPUT_FOLDER
 from audiblez.backends import edge_available, mlx_available, resolve_backend, torch_available
-from audiblez.voices import voices, flags, edge_voices, edge_flags, lang_code_for
+from audiblez.voices import voices, flags, edge_voices, edge_flags, lang_code_for, default_languages
 
 EVENTS = {
     'CORE_STARTED': NewEvent(),
@@ -458,13 +458,14 @@ class MainWindow(wx.Frame):
         return f'{flags[code]} {code}'
 
     def rebuild_languages(self):
-        """Repopulate the language listbox for the current backend, all checked."""
+        """Repopulate the language listbox for the current backend, ticking the defaults."""
         codes = self.languages_for_backend(self.selected_backend)
         self.language_codes = codes
         self.language_listbox.SetItems([self.language_label(self.selected_backend, c) for c in codes])
-        for i in range(len(codes)):
-            self.language_listbox.Check(i)
-        self.selected_languages = set(codes)
+        selected = default_languages(codes)
+        for i, code in enumerate(codes):
+            self.language_listbox.Check(i, code in selected)
+        self.selected_languages = selected
         self.rebuild_voice_dropdown()
 
     def on_select_languages(self, event):
