@@ -346,6 +346,36 @@ class EdgeRetryTest(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(len(fake.calls), 2)
 
+    def test_no_audio_received_is_retried_then_succeeds(self):
+        # The reported crash: '②"。' raised NoAudioReceived three times mid-book and read
+        # fine moments later. It is speakable -- the service was throttling.
+        from edge_tts.exceptions import NoAudioReceived
+        out, fake = self.call([NoAudioReceived('no audio'), make_mp3()], text='②"。')
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_persistent_no_audio_skips_rather_than_killing_the_book(self):
+        # However often the service says "no audio", it is never a reason to lose the
+        # finished chapters -- that is what turned a throttled fragment into a dead run.
+        from edge_tts.exceptions import NoAudioReceived
+        out, fake = self.call([NoAudioReceived('no audio')] * backends.EDGE_ATTEMPTS,
+                              text='②"。')
+        self.assertEqual(out, [])
+        self.assertEqual(len(fake.calls), backends.EDGE_ATTEMPTS)
+
+    def test_transport_failure_still_raises(self):
+        # A service that cannot be reached is a broken run, not a skippable fragment, so
+        # this must stay fatal rather than silently producing a book full of gaps.
+        with self.assertRaises(RuntimeError):
+            self.call([ConnectionError('unreachable')] * backends.EDGE_ATTEMPTS)
+
+    def test_backoff_outlasts_throttling_and_holds_at_the_last_step(self):
+        waits = [backends._retry_wait(a) for a in range(1, backends.EDGE_ATTEMPTS + 1)]
+        self.assertEqual(waits[:3], [3.0, 8.0, 20.0])
+        self.assertEqual(waits[-1], 20.0, 'later attempts hold at the longest wait')
+        self.assertGreaterEqual(sum(waits[:backends.EDGE_ATTEMPTS - 1]), 30,
+                                'total backoff must outlast throttling, not a round trip')
+
     def test_persistent_failure_raises_naming_the_text(self):
         with self.assertRaises(RuntimeError) as ctx:
             self.call([RuntimeError('boom')] * backends.EDGE_ATTEMPTS)

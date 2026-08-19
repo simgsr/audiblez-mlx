@@ -188,11 +188,32 @@ class MlxKokoroPipeline:
 # "Format not recognised" and killed the whole book. `\w` covers Han, kana and Latin alike.
 _SPEAKABLE_RE = re.compile(r'\w', re.UNICODE)
 
-# Edge is a network service, and a single dropped or empty response should not cost a
-# multi-hour book. Measured: valid text occasionally comes back with zero audio bytes when
-# requests are issued back to back, and succeeds on a retry moments later.
-EDGE_ATTEMPTS = 3
-EDGE_RETRY_WAIT = 2.0
+# Edge is a network service, and a dropped response must not cost a multi-hour book.
+# Measured: perfectly speakable text comes back with no audio when requests are issued back
+# to back -- the service throttles -- and reads normally again after a pause. '②"。' failed
+# three times running mid-book and synthesized fine (1.78s, peak 0.48) moments later, so
+# the waits are sized to outlast throttling rather than a network round trip.
+EDGE_ATTEMPTS = 4
+EDGE_RETRY_WAITS = (3.0, 8.0, 20.0)
+
+
+def _retry_wait(attempt):
+    """Seconds to wait before the retry following `attempt`, holding at the last step."""
+    return EDGE_RETRY_WAITS[min(attempt, len(EDGE_RETRY_WAITS)) - 1]
+
+
+def _is_no_audio(exc):
+    """True when the service reported no speech, as opposed to failing to answer at all.
+
+    edge-tts raises NoAudioReceived both for text it finds nothing to say in and, as
+    observed, when it is simply throttling. Neither is a reason to abandon the book, so
+    this is treated as an empty payload rather than as a fatal error.
+    """
+    try:
+        from edge_tts.exceptions import NoAudioReceived
+    except ImportError:
+        return False
+    return isinstance(exc, NoAudioReceived)
 
 
 class EdgePipeline:
@@ -237,21 +258,24 @@ class EdgePipeline:
             try:
                 mp3 = asyncio.run(synth())
             except Exception as e:
-                # A chapter's .wav is only written once the chapter finishes, and finished
-                # chapters are skipped on the next run, so raising costs this chapter and
-                # not the book.
-                if attempt == EDGE_ATTEMPTS:
-                    raise RuntimeError(
-                        f'Edge TTS failed after {EDGE_ATTEMPTS} attempts on {excerpt!r}: '
-                        f'{type(e).__name__}: {e}') from e
-                print(f'Edge TTS attempt {attempt} failed ({type(e).__name__}); retrying...')
-                time.sleep(EDGE_RETRY_WAIT * attempt)
-                continue
+                if not _is_no_audio(e):
+                    # Could not reach the service at all: that breaks the run, not just this
+                    # fragment. A chapter's .wav is only written once the chapter finishes,
+                    # and finished chapters are skipped on the next run, so raising costs
+                    # this chapter and not the book.
+                    if attempt == EDGE_ATTEMPTS:
+                        raise RuntimeError(
+                            f'Edge TTS failed after {EDGE_ATTEMPTS} attempts on {excerpt!r}: '
+                            f'{type(e).__name__}: {e}') from e
+                    print(f'Edge TTS attempt {attempt} failed ({type(e).__name__}); retrying...')
+                    time.sleep(_retry_wait(attempt))
+                    continue
+                mp3 = b''   # answered, but with no speech: identical to an empty payload
             if mp3:
                 break
             if attempt < EDGE_ATTEMPTS:
                 print(f'Edge TTS returned no audio (attempt {attempt}); retrying...')
-                time.sleep(EDGE_RETRY_WAIT * attempt)
+                time.sleep(_retry_wait(attempt))
 
         if not mp3:
             # The service took the text and sent nothing back, repeatedly. Dropping one
