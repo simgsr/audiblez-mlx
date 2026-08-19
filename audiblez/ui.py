@@ -7,6 +7,7 @@ import soundfile
 import threading
 import platform
 import subprocess
+import traceback
 import io
 import os
 import wx
@@ -25,7 +26,10 @@ EVENTS = {
     'CORE_PROGRESS': NewEvent(),
     'CORE_CHAPTER_STARTED': NewEvent(),
     'CORE_CHAPTER_FINISHED': NewEvent(),
-    'CORE_FINISHED': NewEvent()
+    'CORE_FINISHED': NewEvent(),
+    # Synthesis raised. Without this the worker thread died with its traceback on a terminal
+    # nobody is looking at, leaving the window frozen mid-run with no way back.
+    'CORE_FAILED': NewEvent(),
 }
 
 border = 5
@@ -48,6 +52,7 @@ class MainWindow(wx.Frame):
         self.Bind(EVENTS['CORE_CHAPTER_FINISHED'][1], self.on_core_chapter_finished)
         self.Bind(EVENTS['CORE_PROGRESS'][1], self.on_core_progress)
         self.Bind(EVENTS['CORE_FINISHED'][1], self.on_core_finished)
+        self.Bind(EVENTS['CORE_FAILED'][1], self.on_core_failed)
 
         self.create_menu()
         self.create_layout()
@@ -97,6 +102,29 @@ class MainWindow(wx.Frame):
     def on_core_finished(self, event):
         self.synthesis_in_progress = False
         self.open_folder_with_explorer(self.output_folder_text_ctrl.GetValue())
+
+    def on_core_failed(self, event):
+        """Show what went wrong and hand the window back.
+
+        on_start disables the start button, the params panel and the chapter checkboxes for
+        the duration of the run; if synthesis raises, nothing else re-enables them, so the
+        error has to undo that too or the only way out is to quit the app.
+        """
+        print(event.details)
+        self.synthesis_in_progress = False
+        self.re_enable_after_synthesis()
+        wx.MessageBox(f'Synthesis failed:\n\n{event.message}\n\n'
+                      'The full traceback is on the terminal.',
+                      'Audiblez', wx.OK | wx.ICON_ERROR, self)
+
+    def re_enable_after_synthesis(self):
+        """Undo the disabling on_start did. Safe to call before any book is open."""
+        if self.chapters_panel is None:
+            return
+        self.start_button.Enable()
+        self.start_button.Show()
+        self.params_panel.Enable()
+        self.table.EnableCheckBoxes(True)
 
     def create_layout(self):
         # Panels layout looks like this:
@@ -593,28 +621,41 @@ class MainWindow(wx.Frame):
         button.SetLabel("⏳")
         button.Disable()
 
+        def restore_button():
+            button.SetLabel("🔊 Preview")
+            button.Enable()
+
         def generate_preview():
             import audiblez.core as core
             from audiblez.backends import get_pipeline
-            # Same engine as the real run, or previews stop being representative.
-            core.set_espeak_library()
-            pipeline = get_pipeline(self.get_selected_voice(), lang_code=lang_code,
-                                    backend=self.selected_backend)
-            core.load_spacy()
-            text = self.selected_chapter.extracted_text[:300]
-            if len(text) == 0: return
-            audio_segments = core.gen_audio_segments(
-                pipeline,
-                text,
-                voice=self.get_selected_voice(),
-                speed=self.get_selected_speed())
-            final_audio = np.concatenate(audio_segments)
-            tmp_preview_wav_file = NamedTemporaryFile(suffix='.wav', delete=False)
-            soundfile.write(tmp_preview_wav_file, final_audio, core.sample_rate)
-            cmd = ['ffplay', '-autoexit', '-nodisp', tmp_preview_wav_file.name]
-            subprocess.run(cmd)
-            button.SetLabel("🔊 Preview")
-            button.Enable()
+            try:
+                # Same engine as the real run, or previews stop being representative.
+                core.set_espeak_library()
+                pipeline = get_pipeline(self.get_selected_voice(), lang_code=lang_code,
+                                        backend=self.selected_backend)
+                core.load_spacy()
+                text = self.selected_chapter.extracted_text[:300]
+                if len(text) == 0: return
+                audio_segments = core.gen_audio_segments(
+                    pipeline,
+                    text,
+                    voice=self.get_selected_voice(),
+                    speed=self.get_selected_speed(),
+                    lang_code=lang_code)
+                final_audio = np.concatenate(audio_segments)
+                tmp_preview_wav_file = NamedTemporaryFile(suffix='.wav', delete=False)
+                soundfile.write(tmp_preview_wav_file, final_audio, core.sample_rate)
+                cmd = ['ffplay', '-autoexit', '-nodisp', tmp_preview_wav_file.name]
+                subprocess.run(cmd)
+            except Exception as e:
+                traceback.print_exc()
+                wx.CallAfter(wx.MessageBox, f'Preview failed:\n\n{type(e).__name__}: {e}',
+                             'Audiblez', wx.OK | wx.ICON_ERROR)
+            finally:
+                # wx widgets are only safe to touch from the main thread, and the button has
+                # to come back even when the preview raised -- otherwise it stays on "⏳"
+                # disabled, and previewing is dead for the rest of the session.
+                wx.CallAfter(restore_button)
 
         if len(self.preview_threads) > 0:
             for thread in self.preview_threads:
@@ -688,7 +729,13 @@ class CoreThread(threading.Thread):
 
     def run(self):
         import audiblez.core as core
-        core.main(**self.params, post_event=self.post_event)
+        try:
+            core.main(**self.params, post_event=self.post_event)
+        except Exception as e:
+            # A thread that dies takes its traceback to a terminal the GUI user never sees,
+            # and leaves the window disabled mid-run. Hand the error back to the main thread.
+            self.post_event('CORE_FAILED', message=f'{type(e).__name__}: {e}',
+                            details=traceback.format_exc())
 
     def post_event(self, event_name, **kwargs):
         # eg. 'EVENT_CORE_PROGRESS' -> EventCoreProgress, EVENT_CORE_PROGRESS
