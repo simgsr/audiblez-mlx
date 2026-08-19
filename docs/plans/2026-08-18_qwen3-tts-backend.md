@@ -434,6 +434,21 @@ Regression: all existing tests stay green; Kokoro output must be unchanged.
    experiment of the two.
 4. **Does the `instruct` field belong to the book or the chapter?** Decides whether 5g is
    one text box or a per-chapter column, and therefore whether it is small or large.
-5. **Does low temperature fix the over-long outputs?** Step 3a's open sub-question. If it
-   does, one change closes two risks; if not, the duration-outlier check becomes required
-   rather than nice-to-have.
+5. ~~**Does low temperature fix the over-long outputs?**~~ **Answered 2026-08-19: no, and
+   the premise was wrong.** Low temperature does not cause the repetition loop this
+   question feared, and does not cure the over-long outputs either. On one 110-character
+   English sentence, seeded, every temperature from 0.1 to 0.9 produced 6.3-8.6s of audio
+   — all sane, no trend. The cliff is at exactly **0**, which is not the bottom of the
+   scale but a different algorithm: mlx-audio branches to greedy argmax at `temperature
+   <= 0` and returns before `top_k`/`top_p` are applied. Greedy never emitted a stop token
+   and ran to the 4096-token cap — **327.68s of audio for that one sentence**,
+   reproducibly. `MlxPipeline` now warns on `temperature=0`.
+
+   Since temperature is not the lever, the drift was attacked from the other two
+   directions instead: `top_p` (mlx-audio defaults it to 1.0, i.e. no nucleus filtering at
+   all — now 0.8) and a seed. Five unseeded runs of one passage spread 8.48-15.12s at
+   `top_p=1.0` versus 8.96-13.84s at 0.8, so the cutoff helps but does not close it.
+   Seeding does: MLX's global PRNG is what varies between runs, so `mx.random.seed()`
+   before each `generate()` makes output byte-identical. That closes the reproducibility
+   half of step 3a. **The duration-outlier check is therefore still required** — the
+   over-long outputs remain unexplained, and this question does not close that risk.

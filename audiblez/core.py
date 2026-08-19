@@ -79,7 +79,8 @@ def set_espeak_library():
 
 def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FOLDER,
          max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
-         backend='auto', lang_code=None, repo_id=None, model=DEFAULT_MODEL):
+         backend='auto', lang_code=None, repo_id=None, model=DEFAULT_MODEL,
+         temperature=None, top_p=None, seed=None):
     if post_event: post_event('CORE_STARTED')
     chinese.reset_notice()  # the GUI stays open across books; each run gets its own notice
     load_spacy()
@@ -132,7 +133,7 @@ def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FO
     lang_code = lang_code or default_lang_code(voice, model)
     print(f'Using the {resolved_backend} backend with the {model} model.')
     pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id,
-                            model=model)
+                            model=model, temperature=temperature, top_p=top_p, seed=seed)
 
     chapter_wav_files = []
     chapter_titles = {}
@@ -294,11 +295,12 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
 
 
 def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False,
-             backend='auto', lang_code=None, repo_id=None, model=DEFAULT_MODEL):
+             backend='auto', lang_code=None, repo_id=None, model=DEFAULT_MODEL,
+             temperature=None, top_p=None, seed=None):
     lang_code = lang_code or default_lang_code(voice, model)
     set_espeak_library()
     pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id,
-                            model=model)
+                            model=model, temperature=temperature, top_p=top_p, seed=seed)
     load_spacy()
     audio_segments = gen_audio_segments(pipeline, text, voice=voice, speed=speed, lang_code=lang_code)
     final_audio = np.concatenate(audio_segments)

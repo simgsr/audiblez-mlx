@@ -182,15 +182,32 @@ class GetPipelineTest(unittest.TestCase):
 
 
 class FakeQwenModel:
-    """Stands in for mlx-audio's Qwen3-TTS, which also accepts temperature."""
+    """Stands in for mlx-audio's Qwen3-TTS, which also accepts temperature and top_p."""
 
     def __init__(self):
         self.calls = []
 
-    def generate(self, text, voice, speed, lang_code, split_pattern=None, temperature=None):
+    def generate(self, text, voice, speed, lang_code, split_pattern=None, temperature=None,
+                 top_p=None):
         self.calls.append(dict(text=text, voice=voice, speed=speed, lang_code=lang_code,
-                               split_pattern=split_pattern, temperature=temperature))
+                               split_pattern=split_pattern, temperature=temperature,
+                               top_p=top_p))
         yield FakeResult(np.zeros(64, dtype=np.float32))
+
+
+def fake_mlx_core(seeds):
+    """Stub mlx.core that records every seed the adapter sets.
+
+    Real mlx is installed here, so seeding would silently succeed and prove nothing;
+    capturing the calls is what shows the adapter seeds per call rather than per pipeline.
+    """
+    core = types.ModuleType('mlx.core')
+    random = types.ModuleType('mlx.core.random')
+    random.seed = seeds.append
+    core.random = random
+    pkg = types.ModuleType('mlx')
+    pkg.core = core
+    return {'mlx': pkg, 'mlx.core': core, 'mlx.core.random': random}
 
 
 class ModelRegistryTest(unittest.TestCase):
@@ -257,11 +274,12 @@ class ThroughputSeedTest(unittest.TestCase):
 
 
 class QwenAdapterTest(unittest.TestCase):
-    def build(self, lang_code='english', temperature=None):
+    def build(self, lang_code='english', temperature=None, top_p=None, seed=None):
         model = FakeQwenModel()
         with mock.patch.dict(sys.modules, fake_mlx_audio(model)), \
              mock.patch.object(backends, 'set_espeak_data_path', return_value='/data'):
-            pipeline = backends.MlxPipeline(lang_code, model='qwen3-tts', temperature=temperature)
+            pipeline = backends.MlxPipeline(lang_code, model='qwen3-tts',
+                                            temperature=temperature, top_p=top_p, seed=seed)
         return pipeline, model
 
     def test_forwards_a_low_temperature_by_default(self):
@@ -274,6 +292,91 @@ class QwenAdapterTest(unittest.TestCase):
         pipeline, model = self.build(temperature=0.1)
         list(pipeline('Hello.', voice='ryan'))
         self.assertEqual(model.calls[0]['temperature'], 0.1)
+
+    def test_zero_temperature_is_forwarded_but_warned_about(self):
+        # mlx-audio branches to argmax at temperature <= 0, so 0 is a different algorithm
+        # rather than the bottom of the scale -- and a measured runaway on this model.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            pipeline, model = self.build(temperature=0)
+        list(pipeline('Hello.', voice='ryan'))
+        self.assertEqual(model.calls[0]['temperature'], 0)
+        self.assertEqual(len(caught), 1)
+        self.assertIn('greedy', str(caught[0].message))
+
+    def test_a_normal_temperature_does_not_warn(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            self.build(temperature=0.1)
+        self.assertEqual(caught, [])
+
+    def test_kokoro_is_not_warned_about_a_zero_temperature(self):
+        # Kokoro never receives the value, so there is nothing to warn about.
+        model = FakeMlxModel()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            with mock.patch.dict(sys.modules, fake_mlx_audio(model)), \
+                 mock.patch.object(backends, 'set_espeak_data_path', return_value='/data'):
+                backends.MlxPipeline('a', model='kokoro', temperature=0)
+        self.assertEqual(caught, [])
+
+    def test_negative_temperature_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.build(temperature=-0.5)
+        self.assertIn('temperature', str(ctx.exception))
+
+    def test_forwards_a_narrowed_top_p_by_default(self):
+        pipeline, model = self.build()
+        list(pipeline('Hello.', voice='ryan'))
+        self.assertEqual(model.calls[0]['top_p'], backends.QWEN_DEFAULT_TOP_P)
+        # mlx-audio only filters inside 0 < top_p < 1; at its own default of 1.0 the
+        # distribution tail is untouched, which is the drift this setting exists to curb.
+        self.assertLess(backends.QWEN_DEFAULT_TOP_P, 1.0)
+
+    def test_explicit_top_p_wins(self):
+        pipeline, model = self.build(top_p=0.5)
+        list(pipeline('Hello.', voice='ryan'))
+        self.assertEqual(model.calls[0]['top_p'], 0.5)
+
+    def test_top_p_outside_the_usable_range_is_rejected(self):
+        # mlx-audio would accept and ignore these, narrating a whole book unfiltered.
+        for bad in (8, 0, -0.5, 1.5):
+            with self.assertRaises(ValueError, msg=f'top_p={bad} should be rejected') as ctx:
+                self.build(top_p=bad)
+            self.assertIn('top_p', str(ctx.exception))
+
+    def test_seeds_the_rng_before_every_call(self):
+        pipeline, _ = self.build()
+        seeds = []
+        with mock.patch.dict(sys.modules, fake_mlx_core(seeds)):
+            list(pipeline('One.', voice='ryan'))
+            list(pipeline('Two.', voice='ryan'))
+        # Per call, not per pipeline: re-running one chapter must reproduce it exactly.
+        self.assertEqual(seeds, [backends.QWEN_DEFAULT_SEED, backends.QWEN_DEFAULT_SEED])
+
+    def test_explicit_seed_wins(self):
+        pipeline, _ = self.build(seed=1234)
+        seeds = []
+        with mock.patch.dict(sys.modules, fake_mlx_core(seeds)):
+            list(pipeline('Hello.', voice='ryan'))
+        self.assertEqual(seeds, [1234])
+
+    def test_a_negative_seed_opts_out_of_seeding(self):
+        pipeline, _ = self.build(seed=-1)
+        seeds = []
+        with mock.patch.dict(sys.modules, fake_mlx_core(seeds)):
+            list(pipeline('Hello.', voice='ryan'))
+        self.assertEqual(seeds, [], 'a negative seed should leave the RNG alone')
+
+    def test_kokoro_is_never_seeded(self):
+        model = FakeMlxModel()
+        with mock.patch.dict(sys.modules, fake_mlx_audio(model)), \
+             mock.patch.object(backends, 'set_espeak_data_path', return_value='/data'):
+            pipeline = backends.MlxPipeline('a', model='kokoro')
+        seeds = []
+        with mock.patch.dict(sys.modules, fake_mlx_core(seeds)):
+            list(pipeline('Hello.', voice='af_sky'))
+        self.assertEqual(seeds, [], 'Kokoro does not sample; seeding it would mislead')
 
     def test_kokoro_is_never_given_a_temperature(self):
         model = FakeMlxModel()  # its generate() has no temperature parameter at all

@@ -71,10 +71,37 @@ KOKORO_TO_QWEN_LANG = {
 QWEN_ONLY_LANGUAGES = ('german', 'korean', 'russian')
 
 # Below the library default of 0.9, to reduce the run-to-run variance that makes a
-# re-synthesized chapter sound unlike its neighbours. Deliberately not near-zero: very low
-# temperatures can push autoregressive TTS into repetition loops, and we have not measured
-# where that starts. See open question 5 in the plan.
+# re-synthesized chapter sound unlike its neighbours.
+#
+# Measured since (closing open question 5 in the plan): the repetition loop this was once
+# hedged against does not appear at low temperature at all. On one 110-char English
+# sentence, seeded, everything from 0.1 to 0.9 produced 6.3-8.6s of audio -- all sane. The
+# cliff is at exactly 0, which is not the bottom of the scale but a different algorithm:
+# mlx-audio branches to greedy argmax decoding at temperature <= 0, returning before
+# top_k/top_p are applied. Greedy never emitted EOS and ran to the 4096-token cap, turning
+# that one sentence into 327.68s of audio -- reproducibly, since greedy is deterministic.
+# So 0 also makes top_p and the seed do nothing, and is warned about below.
 QWEN_DEFAULT_TEMPERATURE = 0.7
+
+# The audio length that means generation hit max_tokens instead of finishing: 4096 tokens
+# at 1920 samples each, over a 24kHz rate. Only used to explain the greedy warning.
+QWEN_RUNAWAY_SECONDS = 4096 * 1920 / 24000
+
+# mlx-audio defaults top_p to 1.0, which applies no nucleus truncation at all -- the whole
+# distribution tail stays reachable on every token, and that tail is where the pacing and
+# tone drift comes from. Truncating it constrains delivery without flattening it the way
+# temperature -> 0 does, so this is the knob to reach for first. mlx-audio only filters
+# inside the open interval 0 < top_p < 1 (_apply_probability_filters in its qwen3_tts), so
+# this default has to sit strictly within it to do anything; 1.0 remains accepted from a
+# caller, as an explicit "filter nothing".
+QWEN_DEFAULT_TOP_P = 0.8
+
+# Qwen samples through mx.random.categorical with no explicit key, so MLX's *global* PRNG
+# state is what differs between runs -- measured as a 21% duration swing on byte-identical
+# input. Pinning it makes the model reproducible: same text plus same seed gives the same
+# audio, so a chapter re-run after a crash or a text edit still matches its neighbours.
+# A negative seed opts out and restores fresh randomness on every call.
+QWEN_DEFAULT_SEED = 0
 
 
 def is_apple_silicon():
@@ -231,14 +258,38 @@ class MlxPipeline:
     Audio is converted to numpy so np.concatenate downstream is unaffected.
     """
 
-    def __init__(self, lang_code, repo_id=None, model=DEFAULT_MODEL, temperature=None):
+    def __init__(self, lang_code, repo_id=None, model=DEFAULT_MODEL, temperature=None,
+                 top_p=None, seed=None):
         from mlx_audio.tts.utils import load_model
         set_espeak_data_path()
         self.model_name = model
         self.spec = model_spec(model)
         self.lang_code = resolve_lang_code(lang_code, model)
         self.repo_id = repo_id or self.spec['repos']['mlx']
+        if temperature is not None and temperature < 0:
+            # Negative reaches mlx-audio's greedy branch, so it would "work" while meaning
+            # nothing; 0 is the honest way to ask for that.
+            raise ValueError(
+                f'temperature must be 0 or greater, got {temperature}. Use 0 for greedy '
+                'decoding.')
+        if temperature == 0 and not model_spec(model)['deterministic']:
+            # Left to itself this produces a reproducible disaster rather than an error:
+            # every passage runs to the token cap, so a book would come out hours long.
+            warnings.warn(
+                f'temperature=0 selects greedy decoding, which on {model} did not stop '
+                f'on its own: one 110-character sentence ran to the token cap and '
+                f'produced {QWEN_RUNAWAY_SECONDS:.0f}s of audio. It also bypasses top_p '
+                f'and the seed. Use a small non-zero temperature instead -- 0.1 measured '
+                f'fine -- with a seed for reproducibility.',
+                stacklevel=3)
         self.temperature = temperature
+        # Checked here rather than left to mlx-audio, which ignores anything outside
+        # 0 < top_p < 1 without a word -- so a typo'd 8 instead of 0.8 would quietly
+        # narrate the whole book with no filtering at all.
+        if top_p is not None and not 0 < top_p <= 1:
+            raise ValueError(f'top_p must be greater than 0 and at most 1, got {top_p}')
+        self.top_p = top_p
+        self.seed = seed
         self._warned_about_speed = False
         self.model = load_model(self.repo_id)
 
@@ -259,10 +310,33 @@ class MlxPipeline:
             if temperature is None:
                 temperature = QWEN_DEFAULT_TEMPERATURE
             extra['temperature'] = temperature
+            top_p = self.top_p
+            if top_p is None:
+                top_p = QWEN_DEFAULT_TOP_P
+            extra['top_p'] = top_p
         return extra
+
+    def _seed_rng(self):
+        """Pin MLX's global PRNG, so a non-deterministic model repeats itself.
+
+        Done per call rather than once per pipeline: seeding at construction would leave
+        each chapter drawing from wherever the previous one left the stream, so re-running
+        a single chapter still would not match what it produced the first time. Per call,
+        the same text always yields the same audio.
+        """
+        if self.spec['deterministic']:
+            return          # Kokoro does not sample; seeding it would only mislead
+        seed = self.seed
+        if seed is None:
+            seed = QWEN_DEFAULT_SEED
+        if seed < 0:
+            return          # explicit opt-out: fresh randomness on every call
+        import mlx.core as mx
+        mx.random.seed(seed)
 
     def __call__(self, text, voice, speed=1.0, split_pattern=r'\n\n\n'):
         import numpy as np
+        self._seed_rng()
         for result in self.model.generate(text=text, voice=voice, speed=speed,
                                           lang_code=self.lang_code, split_pattern=split_pattern,
                                           **self._extra_kwargs(speed)):
@@ -275,13 +349,17 @@ MlxKokoroPipeline = MlxPipeline
 
 
 def get_pipeline(voice, lang_code=None, backend='auto', repo_id=None, model=DEFAULT_MODEL,
-                 temperature=None):
+                 temperature=None, top_p=None, seed=None):
     """Build a TTS pipeline callable for `voice`.
 
     lang_code defaults to the first letter of the voice name for Kokoro, which is its own
     convention ('af_sky' -> 'a'). Pass it explicitly for a voice whose name does not carry
     the language, such as a path to a custom .pt voice pack. Qwen speaker names never
     carry a language, so it defaults to auto-detect there.
+
+    temperature, top_p and seed shape the sampling of non-deterministic models and are
+    ignored by Kokoro, which does not sample. See QWEN_DEFAULT_TOP_P and QWEN_DEFAULT_SEED
+    for what they default to and why.
     """
     spec = model_spec(model)
     resolved = resolve_backend(backend)
@@ -296,7 +374,8 @@ def get_pipeline(voice, lang_code=None, backend='auto', repo_id=None, model=DEFA
             hint = ('Install it with: pip install mlx-audio "misaki[en]"' if is_apple_silicon()
                     else 'It needs Apple Silicon; use --backend torch on this machine.')
             raise RuntimeError(f'The mlx backend is not available. {hint}')
-        return MlxPipeline(lang_code, repo_id, model=model, temperature=temperature)
+        return MlxPipeline(lang_code, repo_id, model=model, temperature=temperature,
+                           top_p=top_p, seed=seed)
     if not torch_available():
         raise RuntimeError(
             'The torch backend is not installed. This build ships MLX by default; '

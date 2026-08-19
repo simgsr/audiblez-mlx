@@ -239,15 +239,43 @@ Three things to know before using it:
 
 - **`--speed` is ignored.** The model accepts the value and discards it. audiblez warns
   rather than failing, but the audio always plays at 1.0.
-- **Output is not reproducible.** Qwen samples with a temperature, so re-synthesizing one
-  chapter gives audibly different pacing from its neighbours. audiblez defaults to a lower
-  temperature than the library does to reduce this, but it cannot eliminate it. Kokoro is
-  deterministic.
+- **Output varies run to run unless you seed it.** Qwen samples, so the same text can come
+  back at a different pace and tone each time. audiblez seeds it by default, which makes
+  runs reproducible — see below. Kokoro is deterministic without any of this.
 - **Loudness varies across speakers** by roughly 2x, so audition at matched volume.
 
 Qwen requires the MLX backend; asking for `--backend torch` with it is an error rather than
 a silent fallback. Language is given by name (`english`, `chinese`, `german`, …) or by the
 Kokoro letter, which is translated for you. Hindi is not supported.
+
+### Keeping Qwen consistent
+
+Three flags control the sampling. All are ignored by Kokoro, which does not sample.
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--seed N` | `0` | Pins the RNG. The same text and seed always produce the same audio, so a chapter re-run after a crash or a text edit still matches its neighbours. Pass a negative value for fresh randomness each run |
+| `--top-p P` | `0.8` | Nucleus cutoff. Lower values narrow the pacing and tone drift. Must be above 0 and at most 1; `1.0`, the underlying library's default, filters nothing |
+| `--temperature T` | `0.7` | Sampling randomness. Lower is steadier. **Do not use 0** — see below |
+
+Measured on one English passage, five unseeded runs each: at `--top-p 1.0` the output
+ranged 8.48–15.12s (stdev 2.76s); at `0.8` it ranged 8.96–13.84s (stdev 2.02s). So the
+cutoff narrows the spread but does not close it — **the seed is what actually makes a run
+repeatable**, and it is on by default for that reason.
+
+```
+audiblez book.epub -m qwen3-tts -v ryan --seed 42          # reproducible
+audiblez book.epub -m qwen3-tts -v ryan --top-p 0.6        # tighter delivery
+audiblez book.epub -m qwen3-tts -v ryan --temperature 0.3  # steadier tone
+audiblez book.epub -m qwen3-tts -v ryan --seed -1          # opt out, varies each run
+```
+
+**`--temperature 0` is broken on this model.** It does not mean "least random" — it
+switches the decoder to greedy argmax, which returns before `top_p` is applied and so
+ignores `--top-p` and `--seed` entirely. Measured: greedy never emitted a stop token and
+ran to the 4096-token cap, turning a single 110-character sentence into **327.68s of
+audio**, reproducibly. audiblez warns if you ask for it. Low temperature itself is fine —
+0.1 through 0.9 all produced 6.3–8.6s for that sentence — so reach for `0.1`, not `0`.
 
 ## What gets read
 
