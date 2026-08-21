@@ -124,6 +124,17 @@ audiblez-ui
 The GUI shows which backend will actually run, and lets you pick one explicitly. The torch
 device selector is greyed out when MLX is in use, since it has no effect there.
 
+## Sleep during a long run
+
+A full-length novel takes hours, and an idle Mac suspending halfway through stops the
+synthesis with it. So for as long as a conversion is running — GUI or CLI, right through the
+final ffmpeg pass that writes the `.m4b` — audiblez holds a wake lock (`caffeinate` on macOS,
+`systemd-inhibit` on Linux, `SetThreadExecutionState` on Windows) and drops it the moment the
+book is finished. The display is left alone and may sleep as usual.
+
+Closing the lid still suspends the machine; no application can veto that. If the lock cannot
+be taken, the run prints a warning and carries on.
+
 ## Windows and Linux
 
 This fork targets Apple Silicon and is not tested on Windows or Linux. The torch backend

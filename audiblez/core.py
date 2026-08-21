@@ -27,6 +27,7 @@ from pick import pick
 
 from audiblez import DEFAULT_OUTPUT_FOLDER
 from audiblez import chinese
+from audiblez import power
 from audiblez.backends import get_pipeline, initial_chars_per_sec, resolve_backend
 from audiblez.voices import lang_code_for
 
@@ -77,6 +78,7 @@ def set_espeak_library():
         print("On Linux: sudo apt install espeak-ng")
 
 
+@power.keep_awake()  # a book takes hours; don't let an idle machine suspend halfway
 def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FOLDER,
          max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
          backend='auto', lang_code=None, repo_id=None):
