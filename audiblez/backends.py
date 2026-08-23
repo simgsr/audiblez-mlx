@@ -202,6 +202,15 @@ def _retry_wait(attempt):
     return EDGE_RETRY_WAITS[min(attempt, len(EDGE_RETRY_WAITS)) - 1]
 
 
+class EdgeNoAudio(RuntimeError):
+    """Edge accepted the text and returned no audio, repeatedly.
+
+    Its own class so core.main can fail the one chapter rather than the whole book: a
+    fragment the service truly has nothing to say for would otherwise wedge every
+    re-run at the same sentence.
+    """
+
+
 def _is_no_audio(exc):
     """True when the service reported no speech, as opposed to failing to answer at all.
 
@@ -278,10 +287,15 @@ class EdgePipeline:
                 time.sleep(_retry_wait(attempt))
 
         if not mp3:
-            # The service took the text and sent nothing back, repeatedly. Dropping one
-            # sentence beats losing every finished chapter to it.
-            print(f'Warning: Edge TTS returned no audio for {excerpt!r}; skipping it.')
-            return
+            # The service took the text and sent nothing back, repeatedly. Yielding
+            # nothing would be silent and permanent: gen_audio_segments would return a
+            # short list, the chapter's .wav would be written from it, and the next run
+            # skips chapters whose .wav already exists -- so the missing speech could
+            # never be recovered. Raise instead; core.main drops this chapter without
+            # writing it, so a re-run redoes it.
+            raise EdgeNoAudio(
+                f'Edge TTS returned no audio for {excerpt!r} after {EDGE_ATTEMPTS} '
+                'attempts.')
 
         audio, _ = soundfile.read(io.BytesIO(mp3), dtype='float32')
         yield None, None, audio
@@ -297,6 +311,12 @@ def get_pipeline(voice, lang_code=None, backend='auto', repo_id=None):
     """
     resolved = resolve_backend(backend)
     lang_code = lang_code_for(voice, lang_code)
+    if resolved != 'edge' and is_edge_voice(voice):
+        # Otherwise this fails late and obscurely: mlx only after load_model has pulled
+        # a 339 MB repo, torch on an assertion inside KPipeline about a 'zh-TW' lang_code.
+        raise RuntimeError(
+            f'{voice!r} is an Edge TTS voice, but the {resolved!r} backend was selected. '
+            'Add --backend edge to use it, or pick a Kokoro voice such as af_heart.')
     if resolved == 'mlx':
         if not mlx_available():
             hint = ('Install it with: pip install mlx-audio "misaki[en]"' if is_apple_silicon()

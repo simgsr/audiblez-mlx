@@ -9,7 +9,8 @@ from audiblez import backends
 from audiblez.backends import get_pipeline, mlx_available, resolve_backend
 from audiblez.core import safe_filename_part
 from audiblez.voices import (DEFAULT_LANGUAGES, DEFAULT_LOCALES, default_languages,
-                             edge_voices, is_default_language, lang_code_for, voices)
+                             edge_voices, is_catalog_voice, is_default_language,
+                             is_edge_voice, lang_code_for, voices)
 
 
 class FakeResult:
@@ -351,10 +352,12 @@ class EdgeRetryTest(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(len(fake.calls), 2)
 
-    def test_persistent_silence_skips_the_sentence_rather_than_crashing(self):
-        out, fake = self.call([b''] * backends.EDGE_ATTEMPTS)
-        self.assertEqual(out, [], 'one silent sentence must not lose the finished chapters')
-        self.assertEqual(len(fake.calls), backends.EDGE_ATTEMPTS)
+    def test_persistent_silence_fails_the_chapter_rather_than_truncating_it(self):
+        # Yielding nothing here used to write a short .wav that the next run skipped over,
+        # so the dropped sentence could never be recovered. EdgeNoAudio costs the chapter,
+        # which a re-run can redo.
+        with self.assertRaises(backends.EdgeNoAudio):
+            self.call([b''] * backends.EDGE_ATTEMPTS)
 
     def test_transient_exception_is_retried(self):
         out, fake = self.call([RuntimeError('websocket dropped'), make_mp3()])
@@ -368,13 +371,20 @@ class EdgeRetryTest(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(len(fake.calls), 2)
 
-    def test_persistent_no_audio_skips_rather_than_killing_the_book(self):
+    def test_persistent_no_audio_fails_the_chapter_after_exhausting_retries(self):
         # However often the service says "no audio", it is never a reason to lose the
-        # finished chapters -- that is what turned a throttled fragment into a dead run.
-        out, fake = self.call([FakeNoAudioReceived('no audio')] * backends.EDGE_ATTEMPTS,
-                              text='②"。')
-        self.assertEqual(out, [])
-        self.assertEqual(len(fake.calls), backends.EDGE_ATTEMPTS)
+        # finished chapters -- but it must not silently truncate this one either.
+        with self.assertRaises(backends.EdgeNoAudio) as ctx:
+            self.call([FakeNoAudioReceived('no audio')] * backends.EDGE_ATTEMPTS, text='②"。')
+        self.assertIn('②"。', str(ctx.exception), 'the fragment must be named')
+
+    def test_edge_no_audio_is_distinct_from_a_transport_failure(self):
+        # core.main tells them apart: EdgeNoAudio drops one chapter and the run carries on,
+        # an unreachable service ends the run.
+        self.assertTrue(issubclass(backends.EdgeNoAudio, RuntimeError))
+        with self.assertRaises(RuntimeError) as ctx:
+            self.call([ConnectionError('unreachable')] * backends.EDGE_ATTEMPTS)
+        self.assertNotIsInstance(ctx.exception, backends.EdgeNoAudio)
 
     def test_transport_failure_still_raises(self):
         # A service that cannot be reached is a broken run, not a skippable fragment, so
@@ -439,6 +449,42 @@ class EdgeGetPipelineTest(unittest.TestCase):
             pipeline = get_pipeline('zh-TW-HsiaoChenNeural', backend='edge')
         self.assertIsInstance(pipeline, backends.EdgePipeline)
         self.assertEqual(pipeline.lang_code, 'zh-TW')
+
+    def test_kokoro_backend_rejects_an_edge_voice_up_front(self):
+        # Forgetting --backend edge used to fail only after mlx had downloaded a 339 MB
+        # repo, or inside KPipeline on a 'zh-TW' lang_code.
+        for backend in ('mlx', 'torch'):
+            with self.subTest(backend=backend):
+                with self.assertRaises(RuntimeError) as ctx:
+                    get_pipeline('zh-TW-HsiaoChenNeural', backend=backend)
+                self.assertIn('--backend edge', str(ctx.exception))
+
+
+class EdgeVoiceNameTest(unittest.TestCase):
+    """Locale subtags are not always two letters; edge-tts accepts [a-z]{2,}-[A-Z]{2,}-."""
+
+    def test_longer_subtags_are_recognised(self):
+        for voice, locale in [('yue-CN-XiaoMinNeural', 'yue-CN'),
+                              ('fil-PH-AngeloNeural', 'fil-PH')]:
+            with self.subTest(voice=voice):
+                self.assertTrue(is_edge_voice(voice))
+                self.assertEqual(lang_code_for(voice), locale)
+
+    def test_two_letter_subtags_still_work(self):
+        self.assertTrue(is_edge_voice('zh-TW-HsiaoChenNeural'))
+        self.assertTrue(is_edge_voice('en-GB-SoniaNeural'))
+
+    def test_kokoro_names_blends_and_paths_are_not_edge_voices(self):
+        for voice in ('af_sky', 'af_heart,af_bella', '/voices/custom.pt', '', 'zf_xiaobei'):
+            with self.subTest(voice=voice):
+                self.assertFalse(is_edge_voice(voice))
+
+    def test_catalog_membership_distinguishes_typed_voices(self):
+        self.assertTrue(is_catalog_voice('af_sky'))
+        self.assertTrue(is_catalog_voice('zh-TW-HsiaoChenNeural'))
+        for typed in ('/voices/custom.pt', 'af_heart,af_bella', 'yue-CN-XiaoMinNeural', ''):
+            with self.subTest(typed=typed):
+                self.assertFalse(is_catalog_voice(typed))
 
 
 class MeasuredEtaTest(unittest.TestCase):

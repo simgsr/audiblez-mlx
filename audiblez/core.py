@@ -28,7 +28,7 @@ from pick import pick
 from audiblez import DEFAULT_OUTPUT_FOLDER
 from audiblez import chinese
 from audiblez import power
-from audiblez.backends import get_pipeline, initial_chars_per_sec, resolve_backend
+from audiblez.backends import EdgeNoAudio, get_pipeline, initial_chars_per_sec, resolve_backend
 from audiblez.voices import lang_code_for
 
 sample_rate = 24000
@@ -159,9 +159,17 @@ def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FO
             text = f'{title} – {creator}.\n\n' + text
         start_time = time.time()
         if post_event: post_event('CORE_CHAPTER_STARTED', chapter_index=chapter.chapter_index)
-        audio_segments = gen_audio_segments(
-            pipeline, text, voice, speed, stats, post_event=post_event, max_sentences=max_sentences,
-            lang_code=lang_code)
+        try:
+            audio_segments = gen_audio_segments(
+                pipeline, text, voice, speed, stats, post_event=post_event, max_sentences=max_sentences,
+                lang_code=lang_code)
+        except EdgeNoAudio as e:
+            # Write nothing for this chapter. A .wav on disk is what makes the next run
+            # skip a chapter, so writing a truncated one here would bake the missing
+            # speech in for good; leaving it absent lets a re-run try the chapter again.
+            print(f'Warning: chapter {i} is incomplete and was not written: {e}')
+            chapter_wav_files.remove(chapter_wav_path)
+            continue
         if audio_segments:
             final_audio = np.concatenate(audio_segments)
             soundfile.write(chapter_wav_path, final_audio, sample_rate)

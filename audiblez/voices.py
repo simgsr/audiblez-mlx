@@ -60,7 +60,10 @@ edge_flags = {
 
 # Edge voice names carry their locale: 'zh-TW-HsiaoChenNeural'. Kokoro names ('af_sky'),
 # blends ('af_heart,af_bella') and .pt paths never match.
-_EDGE_VOICE_RE = re.compile(r'^[a-z]{2}-[A-Z]{2}-')
+# Deliberately the same pattern edge-tts validates against (edge_tts/data_classes.py):
+# subtags are not always two letters -- 'yue-CN-XiaoMinNeural' and 'fil-PH-AngeloNeural'
+# are real voices, and a stricter {2} rejected them before the request was ever made.
+_EDGE_VOICE_RE = re.compile(r'^[a-z]{2,}-[A-Z]{2,}-.+Neural$')
 
 # Ticked by default in the GUI's language filter. Ticking every language put all 9 Kokoro
 # languages -- or all 16 Edge locales, ~50 voices -- into one dropdown, burying the handful
@@ -95,6 +98,18 @@ def default_languages(codes):
 def is_edge_voice(voice):
     """True when `voice` names an Edge TTS voice rather than a Kokoro one."""
     return bool(voice) and bool(_EDGE_VOICE_RE.match(voice))
+
+
+def is_catalog_voice(voice):
+    """True when `voice` is one audiblez lists, rather than one the user typed in.
+
+    A .pt path, a blend and an Edge voice outside the curated locales are all legal to
+    type but appear in no list, so callers must not treat their absence as "gone".
+    """
+    if not voice:
+        return False
+    return (any(voice in names for names in voices.values())
+            or any(voice in names for names in edge_voices.values()))
 
 
 def lang_code_for(voice, lang_code=None):

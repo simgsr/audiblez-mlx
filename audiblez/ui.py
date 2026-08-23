@@ -19,7 +19,8 @@ from pathlib import Path
 
 from audiblez import DEFAULT_OUTPUT_FOLDER
 from audiblez.backends import edge_available, mlx_available, resolve_backend, torch_available
-from audiblez.voices import voices, flags, edge_voices, edge_flags, lang_code_for, default_languages
+from audiblez.voices import (voices, flags, edge_voices, edge_flags, lang_code_for,
+                             default_languages, is_catalog_voice)
 
 EVENTS = {
     'CORE_STARTED': NewEvent(),
@@ -491,12 +492,17 @@ class MainWindow(wx.Frame):
                     choices.append(f'{flags[code]} {v}')
         current = self.get_selected_voice()
         self.voice_dropdown.SetItems(choices)
-        if not choices:
-            self.selected_voice = ''
-            self.voice_dropdown.SetValue('')
-            return
-        # Keep the current voice if it is still offered, else fall back to the first.
-        display = next((c for c in choices if c.split(' ', 1)[1] == current), choices[0])
+        # Keep the current voice if it is still offered.
+        display = next((c for c in choices if c.split(' ', 1)[1] == current), '')
+        if not display:
+            # The dropdown is editable on purpose, and a typed voice -- a .pt path, a
+            # blend, or an Edge voice outside the curated locales -- is in no list, so
+            # ticking one more language must not silently swap it for choices[0] and send
+            # a multi-hour run off with the wrong voice. Only a listed voice whose
+            # language was just unticked falls back.
+            display = current if not is_catalog_voice(current) else ''
+            if not display:
+                display = choices[0] if choices else ''
         self.selected_voice = display
         self.voice_dropdown.SetValue(display)
 
