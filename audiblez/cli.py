@@ -9,7 +9,7 @@ from audiblez.voices import voices, available_voices_str, edge_voices_str
 def cli_main():
     voices_str = ', '.join(voices)
     epilog = ('example:\n' +
-              '  audiblez book.epub -l en-us -v af_sky\n\n' +
+              '  audiblez book.epub -v af_sky\n\n' +
               'to run GUI just run:\n'
               '  audiblez-ui\n\n' +
               'available Kokoro voices:\n' +

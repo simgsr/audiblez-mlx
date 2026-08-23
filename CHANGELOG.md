@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased
+
+Everything below has landed since the `v0.5.0` tag. Note the breaking change: Qwen3-TTS was
+added and then removed again within this range, so it never appeared in a tagged release.
+
+### Added
+
+- **Edge TTS backend** (`--backend edge`, `pip install ".[edge]"`): Microsoft's online neural
+  voices, across 16 locales. It needs network at synthesis time and sends the book's text to
+  Microsoft's servers, so `auto` never selects it — it has to be asked for by name. Requests
+  are retried with a backoff sized to outlast throttling rather than a network round trip.
+- **Traditional Chinese support.** Traditional script is converted to simplified before
+  phonemization, because misaki's jieba/pypinyin dictionaries are simplified-keyed; the text
+  written into the `.m4b` keeps the book's original characters. An Edge `zh-TW` voice reads
+  traditional script natively and skips the conversion, and `zh-HK` voices are real Cantonese
+  rather than Mandarin.
+- **A wake lock for the length of a run** (`caffeinate` on macOS, `systemd-inhibit` on Linux,
+  `SetThreadExecutionState` on Windows), held right through the final ffmpeg pass so an idle
+  machine cannot suspend halfway through a multi-hour conversion. The display is left alone.
+- **A language filter in the GUI voice dropdown**, ticked to English and Chinese by default
+  (`en-US`, `en-GB`, `zh-CN`, `zh-TW` on Edge) so the list is not buried under ~50 voices.
+- All output now defaults to an **`audiobooks/`** folder, created if missing; `-o` overrides.
+
+### Changed
+
+- The GUI reports synthesis errors in a dialog instead of freezing with a disabled window.
+- The time estimate is seeded per language as well as per backend — a CJK character carries
+  far more phonemes than a Latin one, and the first ETA for a Chinese book was optimistic by
+  4-6x without it.
+
+### Fixed
+
+- Edge no longer silently drops a sentence it returned no audio for. That wrote a truncated
+  chapter `.wav`, which the resume path then skipped over, making the loss permanent; the
+  chapter is now failed and left unwritten so a re-run redoes it.
+- An Edge voice name with a 3-letter subtag (`yue-CN-…`, `fil-PH-…`) is recognised instead of
+  being rejected as "not an Edge TTS voice".
+- Selecting a Kokoro backend with an Edge voice fails immediately rather than after mlx has
+  downloaded a 339 MB model repo.
+- A hand-typed voice in the GUI — a `.pt` path, a blend, or an uncurated Edge voice — survives
+  ticking a language checkbox instead of being silently replaced.
+- jieba can load its dictionary on setuptools 81-83, where `pkg_resources.resource_stream`
+  is gone but the module still imports.
+- The Start button in the GUI, broken by removing the `sys.path` hack.
+
+### Removed
+
+- **Qwen3-TTS and the model registry it introduced** (breaking, but never released: it was
+  added and removed within this range).
+
 ## 0.5.0 — first release of the `audiblez_mlx` fork
 
 Forked from [santinic/audiblez](https://github.com/santinic/audiblez) at v0.4.9 and retargeted

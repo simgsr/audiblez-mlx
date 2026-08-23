@@ -137,10 +137,14 @@ be taken, the run prints a warning and carries on.
 
 ## Windows and Linux
 
-This fork targets Apple Silicon and is not tested on Windows or Linux. The torch backend
-still works there — `pip install ".[torch]"` and pass `--backend torch` — but if
-that is your platform you want [the upstream project](https://github.com/santinic/audiblez)
-instead, which supports it properly and has CI for it.
+This fork targets Apple Silicon. Linux is covered by one CI job that installs the
+`[torch]` extra and converts a book end to end, so the fallback is known to work there, but
+it is not a platform this fork optimises for. Windows is not tested at all.
+
+The torch backend is how you run on either — `pip install ".[torch]"` and pass
+`--backend torch` — but if that is your platform you want
+[the upstream project](https://github.com/santinic/audiblez) instead, which supports it
+properly and has CI across all three.
 
 ## Speed
 
@@ -232,8 +236,16 @@ ships no Cantonese voice, so a Hong Kong text will be read correctly, character 
 character, but in Mandarin.
 
 The Edge backend lifts both halves of that limitation. A `zh-TW` voice reads traditional
-script natively — the conversion above is skipped for it, and the OpenCC dependency is not
-needed — and `zh-HK` voices are real Cantonese. Use them with `--backend edge`:
+script natively — the conversion above is skipped for it — and `zh-HK` voices are real
+Cantonese. Use them with `--backend edge`:
+
+```
+# Traditional script, read as written, in Mandarin
+audiblez book.epub -v zh-TW-HsiaoChenNeural --backend edge
+
+# Traditional script, read in Cantonese
+audiblez book.epub -v zh-HK-HiuMaanNeural --backend edge
+```
 
 ## Choosing a backend
 
@@ -298,7 +310,9 @@ To do so, you can use `--pick` to interactively choose the chapters to convert (
 For all the options available, you can check the help page `audiblez --help`:
 
 ```
-usage: audiblez [-h] [-v VOICE] [-p] [-s SPEED] [-c] [-o FOLDER] epub_file_path
+usage: audiblez [-h] [-v VOICE] [-p] [-s SPEED] [-c] [-o FOLDER]
+                [-b {auto,torch,mlx,edge}] [--lang CODE] [--repo-id REPO]
+                epub_file_path
 
 positional arguments:
   epub_file_path        Path to the epub file
@@ -328,7 +342,7 @@ options:
                         default
 
 example:
-  audiblez book.epub -l en-us -v af_sky
+  audiblez book.epub -v af_sky
 
 to run GUI just run:
   audiblez-ui
