@@ -1,4 +1,4 @@
-# audiblez_mlx: Generate audiobooks from e-books, on Apple Silicon
+# audiblez-mlx: Generate audiobooks from e-books, on Apple Silicon
 
 ![Audiblez GUI on MacOSX](./imgs/mac.png)
 
@@ -39,8 +39,8 @@ This fork is **not published to PyPI** — install it from a clone:
 
 ```bash
 brew install ffmpeg espeak-ng                       # on Mac 🍏
-git clone https://github.com/simgsr/audiblez_mlx
-cd audiblez_mlx
+git clone https://github.com/simgsr/audiblez-mlx
+cd audiblez-mlx
 pip install .
 ```
 
@@ -366,5 +366,5 @@ Upstream audiblez by [Claudio Santini](https://claudio.uk) in 2025, distributed 
 Related Article: [Audiblez v4: Generate Audiobooks from E-books](https://claudio.uk/posts/audiblez-v4.html)
 
 This Apple Silicon / MLX fork is maintained separately at
-[simgsr/audiblez_mlx](https://github.com/simgsr/audiblez_mlx), under the same MIT licence.
+[simgsr/audiblez-mlx](https://github.com/simgsr/audiblez-mlx), under the same MIT licence.
 MLX inference via [mlx-audio](https://github.com/Blaizzy/mlx-audio).
