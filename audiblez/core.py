@@ -215,7 +215,7 @@ def find_cover(book):
 def print_selected_chapters(document_chapters, chapters):
     ok = 'X' if platform.system() == 'Windows' else '✅'
     print(tabulate([
-        [i, c.get_name(), len(c.extracted_text), ok if c in chapters else '', chapter_beginning_one_liner(c)]
+        [i, chapter_display_name(c), len(c.extracted_text), ok if c in chapters else '', chapter_beginning_one_liner(c)]
         for i, c in enumerate(document_chapters, start=1)
     ], headers=['#', 'Chapter', 'Text Length', 'Selected', 'First words']))
 
@@ -357,7 +357,7 @@ MIN_LENGTH_TO_SPLIT = 60_000
 # Table-of-contents titles that mark front/back matter rather than a chapter to narrate.
 FRONT_MATTER_TITLES = {
     'content', 'contents', 'table of contents', 'toc', 'index', 'copyright', 'copyright page', 'colophon',
-    'acknowledgements', 'acknowledgments', 'bibliography', 'notes', 'endnotes', 'footnotes',
+    'acknowledgements', 'acknowledgments', 'bibliography', 'references', 'notes', 'endnotes', 'footnotes',
     'glossary', 'about the author', 'about the publisher', 'cover', 'title page', 'half title',
     '目录', '目錄', '版权', '版權', '版权页', '版權頁', '索引', '注释', '註釋', '附录', '附錄',
     '参考文献', '參考文獻', '封面', '扉页', '扉頁', '书名页', '書名頁',
@@ -614,31 +614,107 @@ def chapter_display_name(chapter):
     return getattr(chapter, 'title', '') or chapter.get_name()
 
 
-def find_document_chapters_and_extract_texts(book):
-    """Returns every chapter that is an ITEM_DOCUMENT and enriches each chapter with extracted_text.
+def spine_documents(book):
+    """Every ITEM_DOCUMENT in reading order.
 
-    A book delivered as one big document is split into a chapter per table-of-contents anchor.
+    book.get_items() yields the manifest, whose order is arbitrary; the spine is what the
+    reader (and therefore the table of contents) follows. Anything the spine omits is kept,
+    in manifest order, after the documents it does list.
     """
-    entries_by_file = toc_entries_by_file(book)
-    extracted = []
-    for chapter in book.get_items():
-        if chapter.get_type() != ebooklib.ITEM_DOCUMENT:
-            continue
-        entries = toc_entries_for(chapter.get_name(), entries_by_file)
-        anchors = [anchor for anchor, _ in entries if anchor]
-        sections = extract_sections_from_html(chapter.get_body_content(), anchors)
-        extracted.append((chapter, entries, sections))
+    documents = [item for item in book.get_items() if item.get_type() == ebooklib.ITEM_DOCUMENT]
+    spine = getattr(book, 'spine', None) or []
+    if not spine:
+        return documents
 
-    substantial = sum(1 for _, _, sections in extracted
+    by_id = {}
+    for document in documents:
+        by_id.setdefault(document.get_id(), document)
+
+    ordered, seen = [], set()
+    for entry in spine:
+        idref = entry[0] if isinstance(entry, (tuple, list)) else entry  # ('idref', 'yes'), or a bare idref
+        if not isinstance(idref, str):
+            idref = getattr(idref, 'id', '')  # or the item itself, when the book was built in memory
+        document = by_id.get(idref)
+        if document is not None and id(document) not in seen:
+            ordered.append(document)
+            seen.add(id(document))
+    ordered.extend(d for d in documents if id(d) not in seen)
+    return ordered
+
+
+def read_documents(book, entries_by_file):
+    """Read every document once, cut into (anchor, text) sections at its own table-of-contents anchors."""
+    read = []
+    for document in spine_documents(book):
+        entries = toc_entries_for(document.get_name(), entries_by_file)
+        anchors = [anchor for anchor, _ in entries if anchor]
+        sections = extract_sections_from_html(document.get_body_content(), anchors)
+        read.append((document, entries, sections))
+    return read
+
+
+def toc_driven_chapters(read):
+    """Cut the book where its table of contents says the chapters are.
+
+    A chapter starts at every entry in the contents, and runs until the next one -- across as
+    many documents as that takes. Publishers routinely spill one chapter over a dozen files
+    (index_split_006.html holding nothing but the heading, _008 to _018 the text), so a
+    document the contents never names is a continuation of the chapter before it, not a
+    chapter of its own. The same walk splits the opposite kind of book, where the contents
+    points at several anchors inside one big document.
+
+    Returns [] when the contents is missing or too thin to segment the book, leaving the
+    caller to fall back to one chapter per document.
+    """
+    if sum(len(entries) for _, entries, _ in read) < 2:
+        return []  # no contents, or one that names a single place: nothing to segment by
+    named = {i for i, (_, entries, _) in enumerate(read) if entries}
+    # Does this book spill chapters over several files at all? If every entry in the contents
+    # is followed straight away by the next one, it keeps one file per chapter, and a document
+    # trailing the last entry is back matter the contents forgot -- an index or a notes
+    # section -- which must not be glued onto the end of the final chapter. If instead the
+    # book already runs chapters across unnamed files, a trailing unnamed file is just more
+    # of the last chapter.
+    spills_over_files = any(i not in named for i in range(min(named), max(named)))
+    last_named = len(read) if spills_over_files else max(named)
+
+    chapters = []
+    for index, (document, entries, sections) in enumerate(read):
+        titles = dict(entries)
+        for anchor, text in sections:
+            if not text.strip():
+                continue  # an inline table of contents: nothing left once navigation is dropped
+            title = titles.get(anchor or '')
+            if title is None:
+                if chapters and index <= last_named:
+                    chapters[-1].extracted_text += text
+                    continue
+                title = chapter_display_name(document)
+            elif (chapters and chapters[-1].source is document
+                  and len(chapters[-1].extracted_text.strip()) < MIN_SECTION_LENGTH):
+                # A bare "Chapter 4" divider at its own anchor, just before the anchor holding
+                # the text: merge, keeping the divider's words and title, rather than making a
+                # two-second chapter of it. Only within one document -- across documents a
+                # short chapter (a dedication, say) is a real chapter.
+                chapters[-1].extracted_text += text
+                continue
+            chapters.append(SplitChapter(document, anchor, title, text))
+    return chapters if len(chapters) > 1 else []
+
+
+def per_document_chapters(read, entries_by_file):
+    """One chapter per document: the fallback for books without a usable table of contents.
+
+    A book delivered as one big document is still split into a chapter per contents anchor,
+    since leaving it whole would produce a single unusable chapter.
+    """
+    substantial = sum(1 for _, _, sections in read
                       if sum(len(text.strip()) for _, text in sections) > MIN_SECTION_LENGTH)
 
     document_chapters = []
-    for chapter, entries, sections in extracted:
+    for chapter, entries, sections in read:
         full_text = ''.join(text for _, text in sections)
-        # Split only books that really are one big file: either this is the book's only
-        # document, or it is long enough that leaving it whole would produce an unusable
-        # single chapter. Ordinary per-chapter files keep their existing one-file-one-chapter
-        # behaviour even when the table of contents points at sections inside them.
         should_split = (len(sections) > 1
                         and (substantial <= 1 or len(full_text) > MIN_LENGTH_TO_SPLIT))
         if should_split:
@@ -655,6 +731,24 @@ def find_document_chapters_and_extract_texts(book):
         if not getattr(chapter, 'title', '') and entries:
             chapter.title = entries[0][1]
         document_chapters.append(chapter)
+    return document_chapters
+
+
+def find_document_chapters_and_extract_texts(book):
+    """Returns the book's chapters, each enriched with extracted_text.
+
+    The table of contents decides where the chapters are; documents are only the unit when
+    the book has no contents worth following.
+    """
+    entries_by_file = toc_entries_by_file(book)
+    read = read_documents(book, entries_by_file)
+
+    document_chapters = toc_driven_chapters(read)
+    if document_chapters:
+        print(f'Following the table of contents: {len(read)} documents, '
+              f'{len(document_chapters)} chapters.')
+    else:
+        document_chapters = per_document_chapters(read, entries_by_file)
 
     for i, c in enumerate(document_chapters):
         c.chapter_index = i  # this is used in the UI to identify chapters

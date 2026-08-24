@@ -35,12 +35,31 @@ EVENTS = {
 
 border = 5
 
+# The pixel sizes in this file were picked on a 14" laptop; ui_scale stretches or shrinks
+# them so the same layout fits a small screen and still uses the room on a large one.
+REFERENCE_SCREEN_WIDTH = 1512
+
+
+def current_display():
+    """The display the pointer is on, falling back to the primary one."""
+    index = wx.Display.GetFromPoint(wx.GetMousePosition())
+    return wx.Display(index if index != wx.NOT_FOUND else 0)
+
 
 class MainWindow(wx.Frame):
     def __init__(self, parent, title):
-        screen_width, screen_h = wx.GetDisplaySize()
-        self.window_width = int(screen_width * 0.6)
-        super().__init__(parent, title=title, size=(self.window_width, self.window_width * 3 // 4))
+        # The *usable* rectangle of the display: unlike wx.GetDisplaySize() this leaves out
+        # the macOS menu bar and dock, and the Windows taskbar.
+        self.work_area = current_display().GetClientArea()
+        self.ui_scale = min(max(self.work_area.width / REFERENCE_SCREEN_WIDTH, 0.72), 1.5)
+        window_width = min(int(self.work_area.width * 0.9), self.scaled(1400))
+        window_height = min(int(self.work_area.height * 0.9), window_width * 3 // 4)
+        super().__init__(parent, title=title, size=(window_width, window_height))
+        # The floor only ever shrinks: a big monitor is no reason to stop someone making
+        # the window small, but a small screen must be able to hold the whole frame.
+        shrink = min(self.ui_scale, 1.0)
+        self.SetMinSize((min(int(820 * shrink), self.work_area.width),
+                         min(int(560 * shrink), self.work_area.height)))
         self.chapters_panel = None
         self.preview_threads = []
         self.selected_chapter = None
@@ -57,8 +76,43 @@ class MainWindow(wx.Frame):
 
         self.create_menu()
         self.create_layout()
-        self.Centre()
+        self.centre_on_work_area()
         self.Show(True)
+
+    def scaled(self, size):
+        """A pixel size from the reference layout, adjusted for this screen."""
+        return int(round(size * self.ui_scale))
+
+    def centre_on_work_area(self):
+        """Centre in the usable area, so the title bar never hides under the menu bar."""
+        width, height = self.GetSize()
+        self.SetPosition((self.work_area.x + max(0, (self.work_area.width - width) // 2),
+                          self.work_area.y + max(0, (self.work_area.height - height) // 2)))
+
+    def fit_to_work_area(self):
+        """Grow to what the loaded book's layout needs, but never past the usable screen.
+
+        Opening a book adds the chapter table and the parameters column, which need more
+        room than the empty window; without this the extra panels are simply cut off.
+        """
+        best, current = self.GetBestSize(), self.GetSize()
+        height_wanted = best.height
+        if self.chapters_panel is not None:
+            # The parameters column can always scroll, so it reports a tiny best height and
+            # never asks the frame for room. Ask its sizer what it would rather have, and
+            # give it that much whenever the screen has it to spare.
+            chrome = current.height - self.right_panel.GetSize().height
+            height_wanted = max(height_wanted, self.right_panel.GetSizer().CalcMin().height + chrome)
+        width = min(max(best.width, current.width), self.work_area.width)
+        height = min(max(height_wanted, current.height), self.work_area.height)
+        if (width, height) != tuple(current):
+            self.SetSize(width, height)
+            self.Layout()
+        # Only pull the window back if it now hangs off the screen: otherwise leave it
+        # wherever the user dragged it.
+        x, y = self.GetPosition()
+        self.SetPosition((min(max(x, self.work_area.x), self.work_area.x + self.work_area.width - width),
+                          min(max(y, self.work_area.y), self.work_area.y + self.work_area.height - height)))
 
     def create_menu(self):
         menubar = wx.MenuBar()
@@ -203,14 +257,17 @@ class MainWindow(wx.Frame):
         self.center_panel = wx.Panel(splitter_right)
         self.center_sizer = wx.BoxSizer(wx.VERTICAL)
         self.center_panel.SetSizer(self.center_sizer)
-        self.text_area = wx.TextCtrl(self.center_panel, style=wx.TE_MULTILINE, size=(int(self.window_width * 0.4), -1))
-        font = wx.Font(14, wx.MODERN, wx.NORMAL, wx.NORMAL)
+        self.text_area = wx.TextCtrl(self.center_panel, style=wx.TE_MULTILINE)
+        # A minimum, not a fixed size. The old hard-coded 40% of the window width was a
+        # floor the sizer had to honour, and it squeezed the parameters column to zero.
+        self.text_area.SetMinSize((self.scaled(280), self.scaled(160)))
+        font = wx.Font(min(max(self.scaled(13), 10), 16), wx.MODERN, wx.NORMAL, wx.NORMAL)
         self.text_area.SetFont(font)
         # On text change, update the extracted_text attribute of the selected_chapter:
         self.text_area.Bind(wx.EVT_TEXT, lambda event: setattr(self.selected_chapter, 'extracted_text', self.text_area.GetValue()))
 
-        self.chapter_label = wx.StaticText(
-            self.center_panel, label=f'Edit / Preview content for section "{self.selected_chapter.short_name}":')
+        self.chapter_label = wx.StaticText(self.center_panel)
+        self.set_chapter_label(self.selected_chapter)
         preview_button = wx.Button(self.center_panel, label="🔊 Preview")
         preview_button.Bind(wx.EVT_BUTTON, self.on_preview_chapter)
 
@@ -225,6 +282,12 @@ class MainWindow(wx.Frame):
         splitter_right_sizer.Add(self.center_panel, 1, wx.ALL | wx.EXPAND, 5)
         splitter_right_sizer.Add(self.right_panel, 1, wx.ALL | wx.EXPAND, 5)
 
+    def set_chapter_label(self, chapter):
+        """Long section names wrap: as a single line they widen the whole centre column."""
+        self.chapter_label.SetLabel(f'Edit / Preview content for section "{chapter.short_name}":')
+        self.chapter_label.Wrap(max(self.scaled(260), self.center_panel.GetSize().width - 4 * border))
+        self.center_panel.Layout()
+
     def about_dialog(self):
         msg = ("A simple tool to generate audiobooks from EPUB files using Kokoro-82M models\n" +
                "Distributed under the MIT License.\n\n" +
@@ -233,19 +296,21 @@ class MainWindow(wx.Frame):
         wx.MessageBox(msg, "Audiblez")
 
     def create_right_panel(self, splitter_right):
-        self.right_panel = wx.Panel(splitter_right)
+        self.right_panel = ScrolledPanel(splitter_right, style=wx.TAB_TRAVERSAL)
         self.right_sizer = wx.BoxSizer(wx.VERTICAL)
         self.right_panel.SetSizer(self.right_sizer)
 
         self.book_info_panel_box = wx.Panel(self.right_panel, style=wx.SUNKEN_BORDER)
         book_info_panel_box_sizer = wx.StaticBoxSizer(wx.VERTICAL, self.book_info_panel_box, "Book Details")
         self.book_info_panel_box.SetSizer(book_info_panel_box_sizer)
-        self.right_sizer.Add(self.book_info_panel_box, 1, wx.ALL | wx.EXPAND, 5)
+        # Proportion 0: a wx.BoxSizer sizes stretchable children alike, so three boxes at
+        # proportion 1 asked for three times the tallest one's height and overflowed.
+        self.right_sizer.Add(self.book_info_panel_box, 0, wx.ALL | wx.EXPAND, border)
 
         self.book_info_panel = wx.Panel(self.book_info_panel_box, style=wx.BORDER_NONE)
         self.book_info_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.book_info_panel.SetSizer(self.book_info_sizer)
-        book_info_panel_box_sizer.Add(self.book_info_panel, 1, wx.ALL | wx.EXPAND, 5)
+        book_info_panel_box_sizer.Add(self.book_info_panel, 1, wx.ALL | wx.EXPAND, border)
 
         # Add cover image
         self.cover_bitmap = wx.StaticBitmap(self.book_info_panel, -1)
@@ -259,34 +324,39 @@ class MainWindow(wx.Frame):
         self.create_book_details_panel()
         self.create_params_panel()
         self.create_synthesis_panel()
+        # The parameters are the tallest thing in the window: on a short screen, or in a
+        # window the user has shrunk, this column scrolls rather than losing the Start
+        # button off the bottom or the controls off the side.
+        self.right_panel.SetupScrolling(scroll_x=True, scroll_y=True, scrollToTop=False)
 
     def create_book_details_panel(self):
         book_details_panel = wx.Panel(self.book_info_panel)
-        book_details_sizer = wx.GridBagSizer(10, 10)
+        book_details_sizer = wx.GridBagSizer(self.scaled(8), self.scaled(8))
         book_details_panel.SetSizer(book_details_sizer)
-        self.book_info_sizer.Add(book_details_panel, 1, wx.ALL | wx.EXPAND, 5)
+        self.book_info_sizer.Add(book_details_panel, 1, wx.ALL | wx.EXPAND, border)
 
-        # Add title
-        title_label = wx.StaticText(book_details_panel, label="Title:")
-        title_text = wx.StaticText(book_details_panel, label=self.selected_book_title)
-        book_details_sizer.Add(title_label, pos=(0, 0), flag=wx.ALL, border=5)
-        book_details_sizer.Add(title_text, pos=(0, 1), flag=wx.ALL, border=5)
+        def add_row(row, label, value):
+            """A label and a value that ellipsizes.
 
-        # Add Author
-        author_label = wx.StaticText(book_details_panel, label="Author:")
-        author_text = wx.StaticText(book_details_panel, label=self.selected_book_author)
-        book_details_sizer.Add(author_label, pos=(1, 0), flag=wx.ALL, border=5)
-        book_details_sizer.Add(author_text, pos=(1, 1), flag=wx.ALL, border=5)
+            Laid out at its natural width a long title made this box the widest thing in the
+            window, which stretched the whole right column and squeezed the chapter list.
+            """
+            label_text = wx.StaticText(book_details_panel, label=label)
+            book_details_sizer.Add(label_text, pos=(row, 0), flag=wx.ALL, border=border)
+            value_text = wx.StaticText(book_details_panel, label=value, style=wx.ST_ELLIPSIZE_END)
+            value_text.SetMinSize((self.scaled(95), -1))
+            value_text.SetToolTip(value)
+            book_details_sizer.Add(value_text, pos=(row, 1), flag=wx.ALL | wx.EXPAND, border=border)
 
-        # Add Total length
-        length_label = wx.StaticText(book_details_panel, label="Total Length:")
         if not hasattr(self, 'document_chapters'):
             total_len = 0
         else:
             total_len = sum([len(c.extracted_text) for c in self.document_chapters])
-        length_text = wx.StaticText(book_details_panel, label=f'{total_len:,} characters')
-        book_details_sizer.Add(length_label, pos=(2, 0), flag=wx.ALL, border=5)
-        book_details_sizer.Add(length_text, pos=(2, 1), flag=wx.ALL, border=5)
+
+        add_row(0, "Title:", self.selected_book_title)
+        add_row(1, "Author:", self.selected_book_author)
+        add_row(2, "Total Length:", f'{total_len:,} characters')
+        book_details_sizer.AddGrowableCol(1)
 
     def create_params_panel(self):
         panel_box = wx.Panel(self.right_panel, style=wx.SUNKEN_BORDER)
@@ -294,9 +364,9 @@ class MainWindow(wx.Frame):
         panel_box.SetSizer(panel_box_sizer)
 
         panel = self.params_panel = wx.Panel(panel_box)
-        panel_box_sizer.Add(panel, 1, wx.ALL | wx.EXPAND, 5)
-        self.right_sizer.Add(panel_box, 1, wx.ALL | wx.EXPAND, 5)
-        sizer = wx.GridBagSizer(10, 10)
+        panel_box_sizer.Add(panel, 1, wx.ALL | wx.EXPAND, border)
+        self.right_sizer.Add(panel_box, 1, wx.ALL | wx.EXPAND, border)
+        sizer = wx.GridBagSizer(self.scaled(8), self.scaled(8))
         panel.SetSizer(sizer)
 
         # Backend: which TTS engine runs. MLX is Apple Silicon only and much faster.
@@ -319,6 +389,7 @@ class MainWindow(wx.Frame):
             backend_note = f'"auto" will use {resolved}'
         self.backend_note = wx.StaticText(panel, label=backend_note)
         self.backend_note.SetForegroundColour(wx.Colour(110, 110, 110))
+        self.backend_note.Wrap(self.scaled(200))
         sizer.Add(self.backend_note, pos=(1, 1), flag=wx.ALL, border=border)
 
         # Device only affects the torch backend; MLX always runs on the Apple GPU.
@@ -346,7 +417,7 @@ class MainWindow(wx.Frame):
         # Languages: multi-select, so the voice dropdown only shows the languages you care
         # about. The list depends on the backend (Kokoro codes vs Edge locales).
         language_label = wx.StaticText(panel, label="Languages:")
-        self.language_listbox = wx.CheckListBox(panel, size=(200, 100))
+        self.language_listbox = wx.CheckListBox(panel, size=(self.scaled(180), self.scaled(110)))
         self.language_listbox.Bind(wx.EVT_CHECKLISTBOX, self.on_select_languages)
         sizer.Add(language_label, pos=(3, 0), flag=wx.ALL, border=border)
         sizer.Add(self.language_listbox, pos=(3, 1), flag=wx.ALL | wx.EXPAND, border=border)
@@ -363,6 +434,7 @@ class MainWindow(wx.Frame):
 
         voice_note = wx.StaticText(panel, label='Blend voices with commas, or type a path to a .pt voice')
         voice_note.SetForegroundColour(wx.Colour(110, 110, 110))
+        voice_note.Wrap(self.scaled(200))
         sizer.Add(voice_note, pos=(5, 1), flag=wx.ALL, border=border)
 
         # Add dropdown for speed
@@ -379,12 +451,19 @@ class MainWindow(wx.Frame):
         os.makedirs(default_output, exist_ok=True)
         self.output_folder_text_ctrl = wx.TextCtrl(panel, value=default_output)
         self.output_folder_text_ctrl.SetEditable(False)
-        # self.output_folder_text_ctrl.SetMinSize((200, -1))
+        # Without a minimum the control asks to be as wide as the whole path, which is what
+        # used to push the parameters column past the edge of the screen.
+        self.output_folder_text_ctrl.SetMinSize((self.scaled(150), -1))
+        self.output_folder_text_ctrl.SetToolTip(default_output)
         output_folder_button = wx.Button(panel, label="📂 Select")
         output_folder_button.Bind(wx.EVT_BUTTON, self.open_output_folder_dialog)
         sizer.Add(output_folder_label, pos=(7, 0), flag=wx.ALL, border=border)
         sizer.Add(self.output_folder_text_ctrl, pos=(7, 1), flag=wx.ALL | wx.EXPAND, border=border)
         sizer.Add(output_folder_button, pos=(8, 1), flag=wx.ALL, border=border)
+
+        # Only valid once the cells exist: the controls take any spare width, the labels
+        # keep theirs.
+        sizer.AddGrowableCol(1)
 
         self.rebuild_languages()
 
@@ -395,8 +474,8 @@ class MainWindow(wx.Frame):
         panel_box.SetSizer(panel_box_sizer)
 
         panel = self.synth_panel = wx.Panel(panel_box)
-        panel_box_sizer.Add(panel, 1, wx.ALL | wx.EXPAND, 5)
-        self.right_sizer.Add(panel_box, 1, wx.ALL | wx.EXPAND, 5)
+        panel_box_sizer.Add(panel, 1, wx.ALL | wx.EXPAND, border)
+        self.right_sizer.Add(panel_box, 0, wx.ALL | wx.EXPAND, border)
         sizer = wx.BoxSizer(wx.VERTICAL)
         panel.SetSizer(sizer)
 
@@ -415,7 +494,7 @@ class MainWindow(wx.Frame):
         self.progress_bar_label = wx.StaticText(panel, label="Synthesis Progress:")
         sizer.Add(self.progress_bar_label, 0, wx.ALL, 5)
         self.progress_bar = wx.Gauge(panel, range=100, style=wx.GA_PROGRESS)
-        self.progress_bar.SetMinSize((-1, 30))
+        self.progress_bar.SetMinSize((-1, self.scaled(26)))
         sizer.Add(self.progress_bar, 0, wx.ALL | wx.EXPAND, 5)
         self.progress_bar_label.Hide()
         self.progress_bar.Hide()
@@ -432,6 +511,7 @@ class MainWindow(wx.Frame):
             output_folder = dialog.GetPath()
             print(f"Selected output folder: {output_folder}")
             self.output_folder_text_ctrl.SetValue(output_folder)
+            self.output_folder_text_ctrl.SetToolTip(output_folder)
 
     def on_select_voice(self, event):
         self.selected_voice = event.GetString()
@@ -546,11 +626,15 @@ class MainWindow(wx.Frame):
             pil_image = Image.open(io.BytesIO(cover.content))
             wx_img = wx.EmptyImage(pil_image.size[0], pil_image.size[1])
             wx_img.SetData(pil_image.convert("RGB").tobytes())
-            cover_h = 200
+            cover_h = self.scaled(170)
             cover_w = int(cover_h * pil_image.size[0] / pil_image.size[1])
+            max_w = self.scaled(105)
+            if cover_w > max_w:  # a landscape cover, which the old fixed max width squashed
+                cover_h = int(cover_h * max_w / cover_w)
+                cover_w = max_w
             wx_img.Rescale(cover_w, cover_h)
             self.cover_bitmap.SetBitmap(wx_img.ConvertToBitmap())
-            self.cover_bitmap.SetMaxSize((200, cover_h))
+            self.cover_bitmap.SetMaxSize((cover_w, cover_h))
 
         chapters_panel = self.create_chapters_table_panel(good_chapters)
 
@@ -567,6 +651,8 @@ class MainWindow(wx.Frame):
         self.splitter_left.Layout()
         self.splitter_right.Layout()
         self.splitter.Layout()
+        self.fit_to_work_area()
+        self.resize_table_columns()
 
     def on_table_checked(self, event):
         self.document_chapters[event.GetIndex()].is_selected = True
@@ -579,7 +665,7 @@ class MainWindow(wx.Frame):
         print('Selected', event.GetIndex(), chapter.short_name)
         self.selected_chapter = chapter
         self.text_area.SetValue(chapter.extracted_text)
-        self.chapter_label.SetLabel(f'Edit / Preview content for section "{chapter.short_name}":')
+        self.set_chapter_label(chapter)
 
     def create_chapters_table_panel(self, good_chapters):
         panel = ScrolledPanel(self.splitter_left, -1, style=wx.TAB_TRAVERSAL | wx.SUNKEN_BORDER)
@@ -591,11 +677,8 @@ class MainWindow(wx.Frame):
         table.InsertColumn(1, "Chapter Name")
         table.InsertColumn(2, "Chapter Length")
         table.InsertColumn(3, "Status")
-        table.SetColumnWidth(0, 80)
-        table.SetColumnWidth(1, 150)
-        table.SetColumnWidth(2, 150)
-        table.SetColumnWidth(3, 100)
-        table.SetSize((250, -1))
+        table.SetMinSize((self.scaled(240), self.scaled(160)))
+        table.Bind(wx.EVT_SIZE, self.on_table_resized)
         table.EnableCheckBoxes()
         table.Bind(wx.EVT_LIST_ITEM_CHECKED, self.on_table_checked)
         table.Bind(wx.EVT_LIST_ITEM_UNCHECKED, self.on_table_unchecked)
@@ -610,6 +693,23 @@ class MainWindow(wx.Frame):
         sizer.Add(title_text, 0, wx.ALL, 5)
         sizer.Add(table, 1, wx.ALL | wx.EXPAND, 5)
         return panel
+
+    def on_table_resized(self, event):
+        # Resize the table that sent the event, not self.table: opening a second book tears
+        # the old one down while self.table already points at its replacement.
+        self.resize_table_columns(event.GetEventObject())
+        event.Skip()
+
+    def resize_table_columns(self, table=None):
+        """Share out the width the table has, instead of overflowing a narrow column."""
+        table = table if table is not None else self.table
+        width = table.GetClientSize().width
+        if width <= 0:
+            return
+        included_w, length_w, status_w = self.scaled(70), self.scaled(80), self.scaled(90)
+        name_w = max(self.scaled(90), width - included_w - length_w - status_w - border)
+        for column, column_width in enumerate((included_w, name_w, length_w, status_w)):
+            table.SetColumnWidth(column, column_width)
 
     def get_selected_voice(self):
         """Strip the flag emoji the dropdown prepends, tolerating typed-in custom voices."""

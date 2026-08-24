@@ -20,8 +20,9 @@ instead, on the Apple GPU.
 - **Better text extraction**, which matters more than speed for a listenable result: page
   numbers, footnote markers, inline tables of contents, and index/copyright sections are no
   longer read aloud. See [What gets read](#what-gets-read).
-- **Single-file books are split into real chapters** using the e-book's own table of
-  contents, so the `.m4b` has usable chapter marks instead of one 15-hour track.
+- **Chapters follow the e-book's table of contents**, not its file layout, so the GUI list
+  and the `.m4b` chapter marks match the book — whether it ships as one 15-hour XHTML file or
+  as 209 fragments that are really 18 chapters.
 
 Everything else — the voices, the GUI, the languages — is upstream's work and is unchanged.
 If you are not on Apple Silicon, use [the original project](https://github.com/santinic/audiblez);
@@ -292,12 +293,26 @@ full stop appended after `。`.
 
 ## Chapters
 
-Books that ship as one enormous XHTML file are split into chapters at the anchors their table
-of contents points to, so the `.m4b` gets real chapter marks. Chapter titles come from the
-book's own table of contents rather than filenames — a book whose files are `0.xhtml`,
-`1.xhtml` … used to produce chapters named `0`, `1`, `2`.
+A chapter is one entry in the e-book's table of contents, not one file. The contents is read
+in spine (reading) order, and a chapter runs from its entry to the next one across however
+many files that takes:
 
-Ordinary one-file-per-chapter books are left alone.
+- **Books split into fragments** — a Calibre-style `index_split_006.html` holding just the
+  heading, then `_008` … `_018` holding the text — become one chapter per contents entry.
+  Files the contents never names are continuations of the chapter before them. One such book
+  went from 209 chapters (one per file, named `index_split_042`) to its actual 18.
+- **Books that ship as one enormous XHTML file** are split at the anchors the contents points
+  to, so the `.m4b` gets real chapter marks instead of one 15-hour track.
+- **Chapter titles come from the contents** rather than filenames — a book whose files are
+  `0.xhtml`, `1.xhtml` … used to produce chapters named `0`, `1`, `2`.
+
+Two things are deliberately left alone. A file that trails the last contents entry in a book
+that otherwise keeps one file per chapter is treated as back matter the contents forgot — an
+index, a notes section — and stays its own chapter rather than being glued onto the end of the
+final one. And a book with no usable contents keeps one chapter per file, as before.
+
+Front and back matter the contents names (`Contents`, `Copyright`, `Index`, `About the
+Author`, …) is listed but left unticked, in the GUI and on the CLI alike.
 
 ## Manually pick chapters to convert
 

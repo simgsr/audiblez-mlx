@@ -25,7 +25,18 @@ added and then removed again within this range, so it never appeared in a tagged
 
 ### Changed
 
+- **Chapters now follow the book's table of contents instead of its file layout.** A chapter
+  starts at each contents entry and runs to the next one, over as many documents as that
+  takes, so books that spill one chapter across a dozen files (`index_split_006.html` …
+  `_018`) no longer produce a chapter — and a `.wav` — per fragment: one real book went from
+  209 chapters to its actual 18. The same walk still splits single-file books at their
+  contents anchors, and books with no usable contents still get one chapter per document.
+  Documents are read in spine order rather than manifest order. Because chapter `.wav`
+  filenames encode the chapter, a part-finished book from an earlier version will re-synthesize
+  rather than resume.
 - The GUI reports synthesis errors in a dialog instead of freezing with a disabled window.
+- The CLI's chapter table lists chapter titles instead of filenames.
+- `References` joins the titles treated as back matter, so it is listed but not ticked.
 - The time estimate is seeded per language as well as per backend — a CJK character carries
   far more phonemes than a Latin one, and the first ETA for a Chinese book was optimistic by
   4-6x without it.
@@ -44,6 +55,14 @@ added and then removed again within this range, so it never appeared in a tagged
 - jieba can load its dictionary on setuptools 81-83, where `pkg_resources.resource_stream`
   is gone but the module still imports.
 - The Start button in the GUI, broken by removing the `sys.path` hack.
+- **The GUI now fits the screen it opens on.** The window is sized from the display's usable
+  area — menu bar, dock and taskbar excluded — and every fixed pixel size in it scales with
+  that, so the layout suits a 13" laptop and a 27" monitor alike. The parameters column had
+  been squeezed to zero width by a text area whose hard-coded width the sizer had to honour,
+  and the three boxes stacked in it asked for three times the tallest one's height; both are
+  fixed, and the column scrolls rather than clipping when the screen is too short for it. A
+  long book title or output path no longer stretches the window, and the chapter table's
+  columns share out the width they actually have.
 
 ### Removed
 
