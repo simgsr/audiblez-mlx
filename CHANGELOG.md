@@ -25,6 +25,13 @@ added and then removed again within this range, so it never appeared in a tagged
 
 ### Changed
 
+- **Edge TTS requests are now batched.** Consecutive sentences are grouped into one request
+  per up to 1500 characters instead of one network round trip per sentence, so a book with
+  thousands of short sentences no longer pays thousands of serial round trips — a live run
+  spent ~76 minutes of CPU time across more than a day of wall clock, almost all of it
+  waiting on those individual round trips. A sentence already over the budget is still sent
+  whole rather than split further, since Edge has no length limit worth working around.
+  Kokoro and torch keep the existing one-call-per-sentence behavior, unaffected.
 - **Chapters now follow the book's table of contents instead of its file layout.** A chapter
   starts at each contents entry and runs to the next one, over as many documents as that
   takes, so books that spill one chapter across a dozen files (`index_split_006.html` …

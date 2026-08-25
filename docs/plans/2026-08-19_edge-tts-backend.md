@@ -2,7 +2,10 @@
 
 Date: 2026-08-19
 Branch: `feat/traditional-chinese`
-Status: **planned, not implemented.**
+Status: **implemented and shipped**, including the traditional-Chinese/Cantonese scope and
+the GUI language multi-selector described below. Its own per-sentence request pattern was
+later found to be network-round-trip-bound on long books and batched into fewer, larger
+requests — see `perf(edge): batch sentences into fewer Edge requests` and the CHANGELOG.
 
 ## Goal & scope
 
