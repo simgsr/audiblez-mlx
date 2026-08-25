@@ -749,5 +749,20 @@ class GenAudioSegmentsEdgeBatchingTest(unittest.TestCase):
         self.assertEqual(len(calls), 5, calls)
 
 
+class SentencizerAutoDownloadTest(unittest.TestCase):
+    """gen_audio_segments is called directly by tests (see above) and could be by other
+    callers too -- it must not assume main() or gen_text() already downloaded the spaCy
+    model. A bare spacy.load() raises OSError E050 on a machine that has never fetched
+    xx_ent_wiki_sm; this broke CI the first time GenAudioSegmentsEdgeBatchingTest ran on a
+    fresh runner, since nothing upstream of it had called load_spacy() yet."""
+
+    def test_get_sentencizer_downloads_the_model_if_missing(self):
+        from audiblez import core
+        with mock.patch.object(core, '_sentencizer', None), \
+             mock.patch.object(core, 'load_spacy') as load_spacy:
+            core._get_sentencizer()
+        load_spacy.assert_called_once()
+
+
 if __name__ == '__main__':
     unittest.main()
