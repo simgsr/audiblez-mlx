@@ -279,6 +279,11 @@ def _get_sentencizer():
     """
     global _sentencizer
     if _sentencizer is None:
+        # load_spacy() downloads the model if it is missing rather than assuming main()
+        # or gen_text() already did: gen_audio_segments is called directly by tests (and
+        # could be by other callers), and spacy.load() alone raises OSError E050 on a
+        # machine that has never fetched xx_ent_wiki_sm.
+        load_spacy()
         _sentencizer = spacy.load('xx_ent_wiki_sm')
         _sentencizer.add_pipe('sentencizer')
     return _sentencizer
