@@ -14,6 +14,9 @@ dependencies = [
     "bs4 (>=0.0.2,<0.0.3)",
     "spacy (>=3.8.3,<4.0.0)",
     "misaki[en,zh] (>=0.9.2)",
+    # Traditional -> simplified before phonemization: misaki's jieba/pypinyin dictionaries
+    # are simplified-keyed. Pure Python, no build step. See audiblez/chinese.py.
+    "opencc-python-reimplemented (>=0.1.7,<0.2.0)",
     "tabulate (>=0.9.0,<0.10.0)",
     "mlx-audio (>=0.5.0) ; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
@@ -23,6 +26,12 @@ dependencies = [
 # Pulls in torch (~2GB), which is why it is not installed by default here.
 torch = [
     "kokoro (==0.9.4)",
+]
+# Microsoft Edge's online TTS: high-quality neural voices (incl. real Cantonese and
+# native traditional-script reading) with no model download. Requires network at
+# synthesis time; the book's text is sent to Microsoft's servers.
+edge = [
+    "edge-tts (>=7.2.0)",
 ]
 gui = [
     "wxpython (>=4.2)",
@@ -50,8 +59,8 @@ requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [project.urls]
-Repository = "https://github.com/simgsr/audiblez_mlx"
-Issues = "https://github.com/simgsr/audiblez_mlx/issues"
+Repository = "https://github.com/simgsr/audiblez-mlx"
+Issues = "https://github.com/simgsr/audiblez-mlx/issues"
 "Upstream project" = "https://github.com/santinic/audiblez"
 
 [project.scripts]

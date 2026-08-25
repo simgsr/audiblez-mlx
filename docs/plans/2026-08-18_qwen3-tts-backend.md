@@ -2,9 +2,25 @@
 
 Date: 2026-08-18
 Branch: `main`
-Status: **implemented** — steps 1-7 landed, except 5g (`instruct`, deliberately deferred).
-Open question 1 (is the quality actually better?) is still unanswered and is the only
-thing gating whether the model is worth using; the plumbing does not depend on it.
+Status: **reverted 2026-08-19.** Implemented, used, and then removed along with the whole
+model registry it introduced; the project is Kokoro-only again. Kept as a design record so
+the next person to consider Qwen3-TTS can start from the measurements rather than repeat
+them.
+
+Why it was dropped, in the order the problems actually mattered:
+
+1. **Too slow.** 62 chars/sec against Kokoro's 666 in English — a 500k-character novel goes
+   from ~13 minutes to ~2.2 hours. This alone decided it.
+2. **Too few voices.** 9 speakers, of which **2** are English, against Kokoro's 54/28. The
+   opt-in model was weakest exactly where most books are.
+3. **Tone and pacing drift.** It samples, so identical text came back at different lengths
+   and deliveries. Seeding made runs reproducible and `top_p` narrowed the spread (see open
+   question 5 below), but neither made the delivery itself pleasant to listen to.
+
+The sampling controls added to tame item 3 (`--temperature`, `--top-p`, `--seed`) went with
+it: Kokoro is deterministic and ignores all three, so nothing was left for them to do.
+
+Everything below is the original plan, left as written.
 
 ## Goal & scope
 
@@ -434,6 +450,21 @@ Regression: all existing tests stay green; Kokoro output must be unchanged.
    experiment of the two.
 4. **Does the `instruct` field belong to the book or the chapter?** Decides whether 5g is
    one text box or a per-chapter column, and therefore whether it is small or large.
-5. **Does low temperature fix the over-long outputs?** Step 3a's open sub-question. If it
-   does, one change closes two risks; if not, the duration-outlier check becomes required
-   rather than nice-to-have.
+5. ~~**Does low temperature fix the over-long outputs?**~~ **Answered 2026-08-19: no, and
+   the premise was wrong.** Low temperature does not cause the repetition loop this
+   question feared, and does not cure the over-long outputs either. On one 110-character
+   English sentence, seeded, every temperature from 0.1 to 0.9 produced 6.3-8.6s of audio
+   — all sane, no trend. The cliff is at exactly **0**, which is not the bottom of the
+   scale but a different algorithm: mlx-audio branches to greedy argmax at `temperature
+   <= 0` and returns before `top_k`/`top_p` are applied. Greedy never emitted a stop token
+   and ran to the 4096-token cap — **327.68s of audio for that one sentence**,
+   reproducibly. `MlxPipeline` now warns on `temperature=0`.
+
+   Since temperature is not the lever, the drift was attacked from the other two
+   directions instead: `top_p` (mlx-audio defaults it to 1.0, i.e. no nucleus filtering at
+   all — now 0.8) and a seed. Five unseeded runs of one passage spread 8.48-15.12s at
+   `top_p=1.0` versus 8.96-13.84s at 0.8, so the cutoff helps but does not close it.
+   Seeding does: MLX's global PRNG is what varies between runs, so `mx.random.seed()`
+   before each `generate()` makes output byte-identical. That closes the reproducibility
+   half of step 3a. **The duration-outlier check is therefore still required** — the
+   over-long outputs remain unexplained, and this question does not close that risk.

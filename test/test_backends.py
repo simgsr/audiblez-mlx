@@ -1,7 +1,6 @@
 import sys
 import types
 import unittest
-import warnings
 from unittest import mock
 
 import numpy as np
@@ -9,6 +8,9 @@ import numpy as np
 from audiblez import backends
 from audiblez.backends import get_pipeline, mlx_available, resolve_backend
 from audiblez.core import safe_filename_part
+from audiblez.voices import (DEFAULT_LANGUAGES, DEFAULT_LOCALES, default_languages,
+                             edge_voices, is_catalog_voice, is_default_language,
+                             is_edge_voice, lang_code_for, voices)
 
 
 class FakeResult:
@@ -44,6 +46,7 @@ class ResolveBackendTest(unittest.TestCase):
     def test_explicit_backends_pass_through(self):
         self.assertEqual(resolve_backend('torch'), 'torch')
         self.assertEqual(resolve_backend('mlx'), 'mlx')
+        self.assertEqual(resolve_backend('edge'), 'edge')
 
     def test_unknown_backend_is_rejected(self):
         with self.assertRaises(ValueError) as ctx:
@@ -181,159 +184,307 @@ class GetPipelineTest(unittest.TestCase):
         self.assertEqual(pipeline.lang_code, 'b')
 
 
-class FakeQwenModel:
-    """Stands in for mlx-audio's Qwen3-TTS, which also accepts temperature."""
+class FakeEdgeTTS:
+    """Stands in for the edge_tts package, recording how Communicate was called.
 
-    def __init__(self):
+    stream() yields one audio chunk holding `mp3_bytes` -- a real MP3, so the pipeline's
+    soundfile decode is exercised rather than mocked away.
+    """
+
+    def __init__(self, mp3_bytes):
+        self.mp3_bytes = mp3_bytes
         self.calls = []
 
-    def generate(self, text, voice, speed, lang_code, split_pattern=None, temperature=None):
-        self.calls.append(dict(text=text, voice=voice, speed=speed, lang_code=lang_code,
-                               split_pattern=split_pattern, temperature=temperature))
-        yield FakeResult(np.zeros(64, dtype=np.float32))
+    def Communicate(self, text, voice, rate=None, **kwargs):
+        self.calls.append(dict(text=text, voice=voice, rate=rate, **kwargs))
+        return self
+
+    async def stream(self):
+        yield {'type': 'audio', 'data': self.mp3_bytes}
 
 
-class ModelRegistryTest(unittest.TestCase):
-    def test_unknown_model_is_rejected(self):
-        with self.assertRaises(ValueError) as ctx:
-            backends.model_spec('festival-tts')
-        self.assertIn('festival-tts', str(ctx.exception))
+class FakeNoAudioReceived(Exception):
+    """Stands in for edge_tts.exceptions.NoAudioReceived.
 
-    def test_qwen_on_torch_names_the_supported_runtime(self):
-        with mock.patch.object(backends, 'torch_available', return_value=True):
+    Defined here rather than imported from edge_tts: it is an optional extra that the CI
+    jobs do not install, so importing the real class made these tests error there.
+    _is_no_audio resolves the class through sys.modules, so the stand-in is what it finds.
+    """
+
+
+def fake_edge_tts_module(fake):
+    pkg = types.ModuleType('edge_tts')
+    pkg.Communicate = fake.Communicate
+    # _is_no_audio does `from edge_tts.exceptions import NoAudioReceived`, so the submodule
+    # has to be registered too, not just hung off the package.
+    exceptions = types.ModuleType('edge_tts.exceptions')
+    exceptions.NoAudioReceived = FakeNoAudioReceived
+    pkg.exceptions = exceptions
+    return {'edge_tts': pkg, 'edge_tts.exceptions': exceptions}
+
+
+def make_mp3():
+    import io
+    import numpy as np
+    import soundfile
+    buf = io.BytesIO()
+    soundfile.write(buf, np.zeros(1000, dtype=np.float32), 24000, format='MP3')
+    return buf.getvalue()
+
+
+class EdgePipelineTest(unittest.TestCase):
+    def build(self, lang_code='zh-TW'):
+        fake = FakeEdgeTTS(make_mp3())
+        pipeline = backends.EdgePipeline(lang_code)
+        return pipeline, fake
+
+    def run_pipeline(self, pipeline, fake, *args, **kwargs):
+        # The pipeline imports edge_tts inside __call__, so the fake must be in
+        # sys.modules for the call itself, not just for construction.
+        with mock.patch.dict(sys.modules, fake_edge_tts_module(fake)):
+            return list(pipeline(*args, **kwargs))
+
+    def test_yields_kokoro_shaped_triples_with_numpy_audio(self):
+        pipeline, fake = self.build()
+        out = self.run_pipeline(pipeline, fake, '你好。', voice='zh-TW-HsiaoChenNeural', speed=1.0)
+        self.assertEqual(len(out), 1)
+        for graphemes, phonemes, audio in out:
+            self.assertIsNone(graphemes)
+            self.assertIsNone(phonemes)
+            self.assertIsInstance(audio, np.ndarray)
+        # gen_audio_segments concatenates these, so they must survive np.concatenate
+        self.assertGreater(len(np.concatenate([a for _, _, a in out])), 0)
+
+    def test_maps_speed_to_rate(self):
+        pipeline, fake = self.build()
+        self.run_pipeline(pipeline, fake, 'Hello.', voice='en-US-AriaNeural', speed=1.5)
+        self.run_pipeline(pipeline, fake, 'Hello.', voice='en-US-AriaNeural', speed=0.5)
+        self.run_pipeline(pipeline, fake, 'Hello.', voice='en-US-AriaNeural', speed=1.0)
+        self.assertEqual([c['rate'] for c in fake.calls], ['+50%', '-50%', '+0%'])
+
+    def test_passes_text_and_voice_through(self):
+        pipeline, fake = self.build()
+        self.run_pipeline(pipeline, fake, 'Hello.', voice='en-US-AriaNeural', speed=1.0)
+        self.assertEqual(fake.calls[0]['text'], 'Hello.')
+        self.assertEqual(fake.calls[0]['voice'], 'en-US-AriaNeural')
+
+    def test_ignores_split_pattern(self):
+        # edge-tts needs no sentence-level split pattern; the argument must not explode.
+        pipeline, fake = self.build()
+        out = self.run_pipeline(pipeline, fake, 'Hello.', voice='en-US-AriaNeural',
+                                speed=1.0, split_pattern=r'\n\n\n')
+        self.assertEqual(len(out), 1)
+
+
+class ScriptedEdgeTTS:
+    """edge_tts stand-in whose outcome is scripted, one entry per Communicate call.
+
+    An entry is either the bytes to stream back or an exception to raise. Empty bytes
+    reproduce what the real service does for text it finds nothing to say in: it streams no
+    chunk at all and raises nothing.
+    """
+
+    def __init__(self, script=()):
+        self.script = list(script)
+        self.calls = []
+        self._next = b''
+
+    def Communicate(self, text, voice, rate=None, **kwargs):
+        self.calls.append(dict(text=text, voice=voice, rate=rate))
+        self._next = self.script.pop(0) if self.script else b''
+        return self
+
+    async def stream(self):
+        if isinstance(self._next, Exception):
+            raise self._next
+        if self._next:
+            yield {'type': 'audio', 'data': self._next}
+
+
+class EdgeUnspeakableTextTest(unittest.TestCase):
+    """The bug that killed a 15-chapter book 8% in.
+
+    Sentence splitting hands back a bare '\\n' as the last "sentence" of a chapter. edge-tts
+    splits that into zero chunks, then streams nothing and raises nothing, so empty bytes
+    reached soundfile and surfaced as 'Format not recognised'.
+    """
+
+    def run_text(self, text, script=()):
+        fake = ScriptedEdgeTTS(script)
+        pipeline = backends.EdgePipeline('zh-CN')
+        with mock.patch.dict(sys.modules, fake_edge_tts_module(fake)):
+            return list(pipeline(text, voice='zh-CN-XiaoxiaoNeural', speed=1.0)), fake
+
+    def test_bare_newline_is_skipped_without_a_request(self):
+        out, fake = self.run_text('\n')
+        self.assertEqual(out, [])
+        self.assertEqual(fake.calls, [], 'nothing to say means nothing to ask the service')
+
+    def test_punctuation_and_whitespace_only_is_skipped(self):
+        for text in ['「」', '……', '   ', '', '—', '　　']:
+            out, fake = self.run_text(text)
+            self.assertEqual(out, [], f'{text!r} should produce no audio')
+            self.assertEqual(fake.calls, [], f'{text!r} should not be sent')
+
+    def test_real_text_is_still_synthesized(self):
+        out, fake = self.run_text('一九六五年春于美爱荷华城。', script=[make_mp3()])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_speakable_covers_han_kana_latin_and_digits(self):
+        for text in ['你', 'カナ', 'a', '7']:
+            out, fake = self.run_text(text, script=[make_mp3()])
+            self.assertEqual(len(fake.calls), 1, f'{text!r} should be sent')
+
+
+class EdgeRetryTest(unittest.TestCase):
+    """Edge is a network service; one dropped response must not cost a multi-hour book."""
+
+    def call(self, script, text='你好。'):
+        fake = ScriptedEdgeTTS(script)
+        pipeline = backends.EdgePipeline('zh-CN')
+        with mock.patch.dict(sys.modules, fake_edge_tts_module(fake)), \
+             mock.patch.object(backends, 'time'):  # no real backoff in tests
+            return list(pipeline(text, voice='zh-CN-XiaoxiaoNeural', speed=1.0)), fake
+
+    def test_empty_response_is_retried_then_succeeds(self):
+        out, fake = self.call([b'', make_mp3()])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_persistent_silence_fails_the_chapter_rather_than_truncating_it(self):
+        # Yielding nothing here used to write a short .wav that the next run skipped over,
+        # so the dropped sentence could never be recovered. EdgeNoAudio costs the chapter,
+        # which a re-run can redo.
+        with self.assertRaises(backends.EdgeNoAudio):
+            self.call([b''] * backends.EDGE_ATTEMPTS)
+
+    def test_transient_exception_is_retried(self):
+        out, fake = self.call([RuntimeError('websocket dropped'), make_mp3()])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_no_audio_received_is_retried_then_succeeds(self):
+        # The reported crash: '②"。' raised NoAudioReceived three times mid-book and read
+        # fine moments later. It is speakable -- the service was throttling.
+        out, fake = self.call([FakeNoAudioReceived('no audio'), make_mp3()], text='②"。')
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_persistent_no_audio_fails_the_chapter_after_exhausting_retries(self):
+        # However often the service says "no audio", it is never a reason to lose the
+        # finished chapters -- but it must not silently truncate this one either.
+        with self.assertRaises(backends.EdgeNoAudio) as ctx:
+            self.call([FakeNoAudioReceived('no audio')] * backends.EDGE_ATTEMPTS, text='②"。')
+        self.assertIn('②"。', str(ctx.exception), 'the fragment must be named')
+
+    def test_edge_no_audio_is_distinct_from_a_transport_failure(self):
+        # core.main tells them apart: EdgeNoAudio drops one chapter and the run carries on,
+        # an unreachable service ends the run.
+        self.assertTrue(issubclass(backends.EdgeNoAudio, RuntimeError))
+        with self.assertRaises(RuntimeError) as ctx:
+            self.call([ConnectionError('unreachable')] * backends.EDGE_ATTEMPTS)
+        self.assertNotIsInstance(ctx.exception, backends.EdgeNoAudio)
+
+    def test_transport_failure_still_raises(self):
+        # A service that cannot be reached is a broken run, not a skippable fragment, so
+        # this must stay fatal rather than silently producing a book full of gaps.
+        with self.assertRaises(RuntimeError):
+            self.call([ConnectionError('unreachable')] * backends.EDGE_ATTEMPTS)
+
+    def test_backoff_outlasts_throttling_and_holds_at_the_last_step(self):
+        waits = [backends._retry_wait(a) for a in range(1, backends.EDGE_ATTEMPTS + 1)]
+        self.assertEqual(waits[:3], [3.0, 8.0, 20.0])
+        self.assertEqual(waits[-1], 20.0, 'later attempts hold at the longest wait')
+        self.assertGreaterEqual(sum(waits[:backends.EDGE_ATTEMPTS - 1]), 30,
+                                'total backoff must outlast throttling, not a round trip')
+
+    def test_persistent_failure_raises_naming_the_text(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self.call([RuntimeError('boom')] * backends.EDGE_ATTEMPTS)
+        self.assertIn(f'after {backends.EDGE_ATTEMPTS} attempts', str(ctx.exception))
+        self.assertIn('你好。', str(ctx.exception))
+
+
+class EdgeAvailableTest(unittest.TestCase):
+    def test_true_when_edge_tts_installed(self):
+        with mock.patch.dict(sys.modules, {'edge_tts': types.ModuleType('edge_tts')}):
+            self.assertTrue(backends.edge_available())
+
+    def test_false_when_not_installed(self):
+        with mock.patch.dict(sys.modules, {'edge_tts': None}):
+            self.assertFalse(backends.edge_available())
+
+
+class LangCodeForTest(unittest.TestCase):
+    def test_edge_voice_uses_its_locale(self):
+        self.assertEqual(lang_code_for('zh-TW-HsiaoChenNeural'), 'zh-TW')
+        self.assertEqual(lang_code_for('zh-HK-HiuMaanNeural'), 'zh-HK')
+        self.assertEqual(lang_code_for('en-US-AriaNeural'), 'en-US')
+
+    def test_kokoro_voice_uses_first_letter(self):
+        self.assertEqual(lang_code_for('af_sky'), 'a')
+        self.assertEqual(lang_code_for('zf_xiaobei'), 'z')
+
+    def test_explicit_code_wins(self):
+        self.assertEqual(lang_code_for('af_sky', 'b'), 'b')
+        self.assertEqual(lang_code_for('zh-TW-HsiaoChenNeural', 'z'), 'z')
+
+
+class EdgeGetPipelineTest(unittest.TestCase):
+    def test_edge_backend_rejects_a_kokoro_voice(self):
+        with mock.patch.object(backends, 'edge_available', return_value=True):
             with self.assertRaises(RuntimeError) as ctx:
-                get_pipeline('ryan', backend='torch', model='qwen3-tts')
-        message = str(ctx.exception)
-        self.assertIn('mlx', message)
-        self.assertIn('kokoro', message)
+                get_pipeline('af_sky', backend='edge')
+        self.assertIn('not an Edge TTS voice', str(ctx.exception))
 
-    def test_default_model_is_unchanged(self):
-        # Regression guard for every existing call site: no model= must behave as before.
-        with mock.patch.object(backends, 'mlx_available', return_value=True):
-            model = FakeMlxModel()
-            with mock.patch.dict(sys.modules, fake_mlx_audio(model)), \
-                 mock.patch.object(backends, 'set_espeak_data_path', return_value='/data'):
-                pipeline = get_pipeline('af_sky', backend='mlx')
-        self.assertEqual(pipeline.repo_id, backends.MODELS['kokoro']['repos']['mlx'])
-        self.assertEqual(pipeline.lang_code, 'a')
+    def test_edge_backend_without_package_explains_the_extra(self):
+        with mock.patch.object(backends, 'edge_available', return_value=False):
+            with self.assertRaises(RuntimeError) as ctx:
+                get_pipeline('zh-TW-HsiaoChenNeural', backend='edge')
+        self.assertIn('.[edge]', str(ctx.exception))
 
+    def test_edge_backend_returns_an_edge_pipeline(self):
+        with mock.patch.object(backends, 'edge_available', return_value=True):
+            pipeline = get_pipeline('zh-TW-HsiaoChenNeural', backend='edge')
+        self.assertIsInstance(pipeline, backends.EdgePipeline)
+        self.assertEqual(pipeline.lang_code, 'zh-TW')
 
-class LanguageMappingTest(unittest.TestCase):
-    def test_kokoro_codes_map_to_qwen_names(self):
-        self.assertEqual(backends.resolve_lang_code('a', 'qwen3-tts'), 'english')
-        self.assertEqual(backends.resolve_lang_code('b', 'qwen3-tts'), 'english')
-        self.assertEqual(backends.resolve_lang_code('z', 'qwen3-tts'), 'chinese')
-
-    def test_qwen_names_pass_through(self):
-        self.assertEqual(backends.resolve_lang_code('chinese', 'qwen3-tts'), 'chinese')
-        self.assertEqual(backends.resolve_lang_code('german', 'qwen3-tts'), 'german')
-
-    def test_kokoro_is_left_alone(self):
-        self.assertEqual(backends.resolve_lang_code('a', 'kokoro'), 'a')
-
-    def test_hindi_is_rejected_by_name(self):
-        with self.assertRaises(ValueError) as ctx:
-            backends.resolve_lang_code('h', 'qwen3-tts')
-        self.assertIn('Hindi', str(ctx.exception))
-
-    def test_qwen_voice_does_not_derive_language_from_its_name(self):
-        # 'ryan'[0] == 'r', which is not a language; it must fall back to auto-detect.
-        self.assertEqual(backends.default_lang_code('ryan', 'qwen3-tts'), 'auto')
-        self.assertEqual(backends.default_lang_code('af_sky', 'kokoro'), 'a')
+    def test_kokoro_backend_rejects_an_edge_voice_up_front(self):
+        # Forgetting --backend edge used to fail only after mlx had downloaded a 339 MB
+        # repo, or inside KPipeline on a 'zh-TW' lang_code.
+        for backend in ('mlx', 'torch'):
+            with self.subTest(backend=backend):
+                with self.assertRaises(RuntimeError) as ctx:
+                    get_pipeline('zh-TW-HsiaoChenNeural', backend=backend)
+                self.assertIn('--backend edge', str(ctx.exception))
 
 
-class ThroughputSeedTest(unittest.TestCase):
-    def test_chinese_seed_differs_from_the_default(self):
-        with mock.patch.object(backends, 'resolve_backend', return_value='mlx'):
-            self.assertEqual(backends.initial_chars_per_sec('mlx', 'a', 'kokoro'), 900)
-            self.assertEqual(backends.initial_chars_per_sec('mlx', 'z', 'kokoro'), 150)
-            self.assertEqual(backends.initial_chars_per_sec('mlx', 'a', 'qwen3-tts'), 60)
-            self.assertEqual(backends.initial_chars_per_sec('mlx', 'z', 'qwen3-tts'), 27)
+class EdgeVoiceNameTest(unittest.TestCase):
+    """Locale subtags are not always two letters; edge-tts accepts [a-z]{2,}-[A-Z]{2,}-."""
 
-    def test_unknown_language_falls_back_to_the_default(self):
-        with mock.patch.object(backends, 'resolve_backend', return_value='mlx'):
-            self.assertEqual(backends.initial_chars_per_sec('mlx', None, 'kokoro'), 900)
-            self.assertEqual(backends.initial_chars_per_sec('mlx', 'f', 'kokoro'), 900)
+    def test_longer_subtags_are_recognised(self):
+        for voice, locale in [('yue-CN-XiaoMinNeural', 'yue-CN'),
+                              ('fil-PH-AngeloNeural', 'fil-PH')]:
+            with self.subTest(voice=voice):
+                self.assertTrue(is_edge_voice(voice))
+                self.assertEqual(lang_code_for(voice), locale)
 
+    def test_two_letter_subtags_still_work(self):
+        self.assertTrue(is_edge_voice('zh-TW-HsiaoChenNeural'))
+        self.assertTrue(is_edge_voice('en-GB-SoniaNeural'))
 
-class QwenAdapterTest(unittest.TestCase):
-    def build(self, lang_code='english', temperature=None):
-        model = FakeQwenModel()
-        with mock.patch.dict(sys.modules, fake_mlx_audio(model)), \
-             mock.patch.object(backends, 'set_espeak_data_path', return_value='/data'):
-            pipeline = backends.MlxPipeline(lang_code, model='qwen3-tts', temperature=temperature)
-        return pipeline, model
+    def test_kokoro_names_blends_and_paths_are_not_edge_voices(self):
+        for voice in ('af_sky', 'af_heart,af_bella', '/voices/custom.pt', '', 'zf_xiaobei'):
+            with self.subTest(voice=voice):
+                self.assertFalse(is_edge_voice(voice))
 
-    def test_forwards_a_low_temperature_by_default(self):
-        pipeline, model = self.build()
-        list(pipeline('Hello.', voice='ryan'))
-        self.assertEqual(model.calls[0]['temperature'], backends.QWEN_DEFAULT_TEMPERATURE)
-        self.assertLess(backends.QWEN_DEFAULT_TEMPERATURE, 0.9)  # below the library default
-
-    def test_explicit_temperature_wins(self):
-        pipeline, model = self.build(temperature=0.1)
-        list(pipeline('Hello.', voice='ryan'))
-        self.assertEqual(model.calls[0]['temperature'], 0.1)
-
-    def test_kokoro_is_never_given_a_temperature(self):
-        model = FakeMlxModel()  # its generate() has no temperature parameter at all
-        with mock.patch.dict(sys.modules, fake_mlx_audio(model)), \
-             mock.patch.object(backends, 'set_espeak_data_path', return_value='/data'):
-            pipeline = backends.MlxPipeline('a', model='kokoro')
-        list(pipeline('Hello.', voice='af_sky'))
-        self.assertEqual(len(model.calls), 1)
-
-    def test_unsupported_speed_warns_once_but_does_not_raise(self):
-        pipeline, model = self.build()
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
-            list(pipeline('One.', voice='ryan', speed=1.5))
-            list(pipeline('Two.', voice='ryan', speed=1.5))
-        self.assertEqual(len(caught), 1, 'the warning should not repeat per sentence')
-        self.assertIn('speed', str(caught[0].message))
-        self.assertEqual(len(model.calls), 2)
-
-    def test_speed_of_one_is_silent(self):
-        pipeline, _ = self.build()
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
-            list(pipeline('Hello.', voice='ryan', speed=1.0))
-        self.assertEqual(caught, [])
-
-    def test_lang_code_is_translated_at_construction(self):
-        pipeline, _ = self.build(lang_code='z')
-        self.assertEqual(pipeline.lang_code, 'chinese')
-
-
-class VoiceRegistryTest(unittest.TestCase):
-    def test_qwen_speakers_are_listed(self):
-        from audiblez.voices import flat_voices
-        speakers = flat_voices('qwen3-tts')
-        self.assertEqual(len(speakers), 9)
-        self.assertIn('ryan', speakers)
-        self.assertIn('serena', speakers)
-
-    def test_kokoro_table_is_unchanged(self):
-        from audiblez.voices import flat_voices
-        self.assertEqual(len(flat_voices('kokoro')), 54)
-
-    def test_voice_language_lookup(self):
-        from audiblez.voices import voice_language
-        self.assertEqual(voice_language('ryan', 'qwen3-tts'), 'a')
-        self.assertEqual(voice_language('serena', 'qwen3-tts'), 'z')
-        self.assertIsNone(voice_language('af_sky', 'qwen3-tts'))
-
-    def test_every_qwen_language_has_a_flag(self):
-        # The GUI prefixes a flag and get_selected_voice strips it again; a missing flag
-        # would leave the emoji in the voice name and reach the model as an unknown speaker.
-        from audiblez.voices import flags, voices_for
-        for lang in voices_for('qwen3-tts'):
-            self.assertIn(lang, flags)
-
-    def test_unknown_model_is_rejected(self):
-        from audiblez.voices import voices_for
-        with self.assertRaises(ValueError):
-            voices_for('festival-tts')
+    def test_catalog_membership_distinguishes_typed_voices(self):
+        self.assertTrue(is_catalog_voice('af_sky'))
+        self.assertTrue(is_catalog_voice('zh-TW-HsiaoChenNeural'))
+        for typed in ('/voices/custom.pt', 'af_heart,af_bella', 'yue-CN-XiaoMinNeural', ''):
+            with self.subTest(typed=typed):
+                self.assertFalse(is_catalog_voice(typed))
 
 
 class MeasuredEtaTest(unittest.TestCase):
@@ -415,6 +566,92 @@ class ConcatListTest(unittest.TestCase):
         self.assertIn(r"'\''", content)
 
 
+class GenTextLangCodeTest(unittest.TestCase):
+    """gen_text has to resolve the language the same way main() does.
+
+    It used to take voice[:1], which reads 'zh-TW-HsiaoChenNeural' as Kokoro's 'z' -- so a
+    Taiwan voice, which reads traditional script natively, got its text simplified first.
+    """
+
+    def gen_text_lang_code(self, voice, lang_code=None):
+        """The lang_code gen_text hands to the pipeline and to gen_audio_segments."""
+        from audiblez import core
+        seen = {}
+
+        def fake_get_pipeline(voice, lang_code=None, backend='auto', repo_id=None):
+            seen['pipeline'] = lang_code
+            return mock.Mock()
+
+        def fake_gen_audio_segments(pipeline, text, voice, speed, **kwargs):
+            seen['segments'] = kwargs.get('lang_code')
+            return [np.zeros(4, dtype='float32')]
+
+        with mock.patch.object(core, 'get_pipeline', side_effect=fake_get_pipeline), \
+             mock.patch.object(core, 'gen_audio_segments', side_effect=fake_gen_audio_segments), \
+             mock.patch.object(core, 'set_espeak_library'), \
+             mock.patch.object(core, 'load_spacy'), \
+             mock.patch.object(core.soundfile, 'write'):
+            core.gen_text('hello', voice=voice, lang_code=lang_code, output_file='x.wav')
+        self.assertEqual(seen['pipeline'], seen['segments'],
+                         'the pipeline and the text normalizer must agree on the language')
+        return seen['pipeline']
+
+    def test_edge_voice_keeps_its_full_locale(self):
+        self.assertEqual(self.gen_text_lang_code('zh-TW-HsiaoChenNeural'), 'zh-TW')
+        self.assertEqual(self.gen_text_lang_code('zh-HK-HiuMaanNeural'), 'zh-HK')
+        self.assertEqual(self.gen_text_lang_code('en-US-AriaNeural'), 'en-US')
+
+    def test_kokoro_voice_still_uses_its_first_letter(self):
+        self.assertEqual(self.gen_text_lang_code('af_sky'), 'a')
+        self.assertEqual(self.gen_text_lang_code('zf_xiaoxiao'), 'z')
+
+    def test_explicit_lang_code_wins(self):
+        self.assertEqual(self.gen_text_lang_code('/voices/custom.pt', lang_code='j'), 'j')
+
+
+class DefaultLanguagesTest(unittest.TestCase):
+    """Which languages the GUI ticks on startup: English and Chinese, not everything.
+
+    Lives here rather than in a UI test because wxPython is an optional extra that CI does
+    not install -- and the rule is pure data, with no widget involved.
+    """
+
+    def test_kokoro_codes_narrow_to_english_and_chinese(self):
+        self.assertEqual(default_languages(list(voices.keys())), {'a', 'b', 'z'})
+
+    def test_edge_locales_narrow_to_the_four_wanted(self):
+        chosen = default_languages(list(edge_voices.keys()))
+        self.assertEqual(chosen, {'en-US', 'en-GB', 'zh-CN', 'zh-TW'})
+
+    def test_other_languages_are_left_unticked(self):
+        for code in ('e', 'f', 'h', 'i', 'j', 'p', 'ja-JP', 'de-DE', 'pt-BR', 'hi-IN'):
+            self.assertFalse(is_default_language(code), f'{code} should start unticked')
+
+    def test_secondary_english_and_chinese_locales_are_unticked(self):
+        # Ticked by the earlier 'en-'/'zh-' prefix rule; deliberately not any more.
+        for code in ('en-AU', 'en-CA', 'en-IN', 'zh-HK'):
+            self.assertFalse(is_default_language(code), f'{code} should start unticked')
+            self.assertIn(code, edge_voices, f'{code} must still be offered')
+
+    def test_every_offered_language_is_still_available(self):
+        # Narrowing the ticks must not narrow the list itself: the others are one click away.
+        for codes in (list(voices.keys()), list(edge_voices.keys())):
+            self.assertTrue(default_languages(codes).issubset(set(codes)))
+            self.assertLess(len(default_languages(codes)), len(codes))
+
+    def test_unrecognised_codes_fall_back_to_everything(self):
+        # An empty tick set would mean an empty voice dropdown, which is worse than noise.
+        self.assertEqual(default_languages(['q', 'x']), {'q', 'x'})
+
+    def test_the_two_naming_schemes_cannot_collide(self):
+        # One predicate serves both only because no Kokoro letter is a locale and vice
+        # versa; a single-letter code must never match a locale entry.
+        for letter in voices:
+            self.assertNotIn(letter, DEFAULT_LOCALES)
+        for locale in edge_voices:
+            self.assertNotIn(locale, DEFAULT_LANGUAGES)
+
+
 class SafeFilenameTest(unittest.TestCase):
     def test_blended_voice_is_safe(self):
         self.assertEqual(safe_filename_part('af_heart,af_bella'), 'af_heart_af_bella')
@@ -424,6 +661,92 @@ class SafeFilenameTest(unittest.TestCase):
 
     def test_plain_voice_is_untouched(self):
         self.assertEqual(safe_filename_part('af_sky'), 'af_sky')
+
+
+class BatchForEdgeTest(unittest.TestCase):
+    """_batch_for_edge groups sentences for one Edge call each, without dropping any."""
+
+    def test_short_sentences_are_merged_into_one_batch(self):
+        from audiblez.core import _batch_for_edge
+        sentences = ['一。', '二。', '三。']
+        batches = _batch_for_edge(sentences, max_chars=100)
+        self.assertEqual(batches, [sentences])
+
+    def test_a_full_batch_starts_a_new_one(self):
+        from audiblez.core import _batch_for_edge
+        sentences = ['a' * 40, 'b' * 40, 'c' * 40]
+        batches = _batch_for_edge(sentences, max_chars=50)
+        self.assertEqual(batches, [['a' * 40], ['b' * 40], ['c' * 40]])
+
+    def test_a_sentence_over_the_budget_gets_its_own_batch_rather_than_being_split(self):
+        from audiblez.core import _batch_for_edge
+        huge = 'x' * 500
+        batches = _batch_for_edge(['short.', huge, 'short.'], max_chars=100)
+        self.assertEqual(batches, [['short.'], [huge], ['short.']])
+
+    def test_empty_input_yields_no_batches(self):
+        from audiblez.core import _batch_for_edge
+        self.assertEqual(_batch_for_edge([], max_chars=100), [])
+
+    def test_every_sentence_survives_regardless_of_grouping(self):
+        from audiblez.core import _batch_for_edge
+        sentences = [f'sentence {i}.' for i in range(37)]
+        batches = _batch_for_edge(sentences, max_chars=30)
+        flattened = [s for batch in batches for s in batch]
+        self.assertEqual(flattened, sentences)
+
+
+class GenAudioSegmentsEdgeBatchingTest(unittest.TestCase):
+    """gen_audio_segments batches consecutive sentences into one Edge call, and only Edge."""
+
+    class RecordingEdgePipeline(backends.EdgePipeline):
+        """A real EdgePipeline subclass (so isinstance checks pass) that never touches the
+        network: it just records the text of each call."""
+
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, text, voice, speed=1.0, split_pattern=None):
+            self.calls.append(text)
+            yield None, None, np.zeros(4, dtype='float32')
+
+    # English so spaCy's sentencizer actually splits on '.': the xx_ent_wiki_sm sentencizer
+    # used here does not split Chinese text on the full-width '。' (verified separately), so
+    # a Chinese sample would land as a single spaCy "sentence" and prove nothing about
+    # batching multiple sentences together.
+    FIVE_SENTENCES = ('This is sentence one. This is sentence two. This is sentence three. '
+                      'This is sentence four. This is sentence five.')
+
+    def test_edge_pipeline_receives_fewer_calls_than_there_are_sentences(self):
+        from audiblez.core import gen_audio_segments
+        pipeline = self.RecordingEdgePipeline()
+        gen_audio_segments(pipeline, self.FIVE_SENTENCES, voice='en-US-BrianNeural', speed=1.0)
+        self.assertEqual(len(pipeline.calls), 1, pipeline.calls)
+        self.assertEqual(pipeline.calls[0], self.FIVE_SENTENCES)
+
+    def test_edge_pipeline_still_splits_once_the_batch_budget_is_exceeded(self):
+        from audiblez.core import EDGE_BATCH_CHARS, gen_audio_segments
+        sentence = 'This is a filler sentence used to pad the batch past its budget. '
+        text = sentence * (EDGE_BATCH_CHARS // len(sentence) + 5)
+        pipeline = self.RecordingEdgePipeline()
+        gen_audio_segments(pipeline, text, voice='en-US-BrianNeural', speed=1.0)
+        self.assertGreater(len(pipeline.calls), 1)
+        for call in pipeline.calls:
+            self.assertLessEqual(len(call), EDGE_BATCH_CHARS + len(sentence))
+        expected_count = text.count('filler sentence')
+        actual_count = sum(call.count('filler sentence') for call in pipeline.calls)
+        self.assertEqual(actual_count, expected_count, 'no sentence should be dropped or duplicated')
+
+    def test_non_edge_pipelines_keep_one_call_per_sentence(self):
+        from audiblez.core import gen_audio_segments
+        calls = []
+
+        def fake_pipeline(sent_text, voice, speed=1.0, split_pattern=None):
+            calls.append(sent_text)
+            yield None, None, np.zeros(4, dtype='float32')
+
+        gen_audio_segments(fake_pipeline, self.FIVE_SENTENCES, voice='af_heart', speed=1.0)
+        self.assertEqual(len(calls), 5, calls)
 
 
 if __name__ == '__main__':

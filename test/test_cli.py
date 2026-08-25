@@ -13,6 +13,8 @@ class CliTest(unittest.TestCase):
         out = self.cli('--help')
         self.assertIn('af_sky', out)
         self.assertIn('usage:', out)
+        self.assertIn('edge', out)
+        self.assertIn('zh-TW-HsiaoChenNeural', out)
 
     def test_epub(self):
         out = self.cli('epub/mini.epub')

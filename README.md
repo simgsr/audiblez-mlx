@@ -1,4 +1,4 @@
-# audiblez_mlx: Generate audiobooks from e-books, on Apple Silicon
+# audiblez-mlx: Generate audiobooks from e-books, on Apple Silicon
 
 ![Audiblez GUI on MacOSX](./imgs/mac.png)
 
@@ -20,8 +20,9 @@ instead, on the Apple GPU.
 - **Better text extraction**, which matters more than speed for a listenable result: page
   numbers, footnote markers, inline tables of contents, and index/copyright sections are no
   longer read aloud. See [What gets read](#what-gets-read).
-- **Single-file books are split into real chapters** using the e-book's own table of
-  contents, so the `.m4b` has usable chapter marks instead of one 15-hour track.
+- **Chapters follow the e-book's table of contents**, not its file layout, so the GUI list
+  and the `.m4b` chapter marks match the book — whether it ships as one 15-hour XHTML file or
+  as 209 fragments that are really 18 chapters.
 
 Everything else — the voices, the GUI, the languages — is upstream's work and is unchanged.
 If you are not on Apple Silicon, use [the original project](https://github.com/santinic/audiblez);
@@ -39,8 +40,8 @@ This fork is **not published to PyPI** — install it from a clone:
 
 ```bash
 brew install ffmpeg espeak-ng                       # on Mac 🍏
-git clone https://github.com/simgsr/audiblez_mlx
-cd audiblez_mlx
+git clone https://github.com/simgsr/audiblez-mlx
+cd audiblez-mlx
 pip install .
 ```
 
@@ -54,6 +55,18 @@ pip install ".[torch]"
 > On a non-Apple machine the `[torch]` extra is **required**, not optional: `mlx-audio` only
 > installs on Apple Silicon, so a plain `pip install .` elsewhere leaves you with no speech
 > engine at all.
+
+To also get the **Edge backend** — Microsoft's online neural voices, including real
+Cantonese and native traditional-script reading — add the extra:
+
+```bash
+pip install ".[edge]"
+```
+
+Edge needs network at synthesis time and sends the book's text to Microsoft's servers, so
+it is never chosen by `auto`; pick it explicitly with `--backend edge`. Requests are
+batched — several consecutive sentences per network call, rather than one round trip per
+sentence — so wall-clock time on a long book is dominated by synthesis, not by the network.
 
 ### Environment variables
 
@@ -114,16 +127,27 @@ audiblez-ui
 The GUI shows which backend will actually run, and lets you pick one explicitly. The torch
 device selector is greyed out when MLX is in use, since it has no effect there.
 
-The Model dropdown does the same for the voice list: picking `qwen3-tts` swaps the 54 Kokoro
-voices for its 9 speakers, resets the selection, and greys out Speed with a note explaining
-that model ignores it. Qwen only appears as an option when MLX is available.
+## Sleep during a long run
+
+A full-length novel takes hours, and an idle Mac suspending halfway through stops the
+synthesis with it. So for as long as a conversion is running — GUI or CLI, right through the
+final ffmpeg pass that writes the `.m4b` — audiblez holds a wake lock (`caffeinate` on macOS,
+`systemd-inhibit` on Linux, `SetThreadExecutionState` on Windows) and drops it the moment the
+book is finished. The display is left alone and may sleep as usual.
+
+Closing the lid still suspends the machine; no application can veto that. If the lock cannot
+be taken, the run prints a warning and carries on.
 
 ## Windows and Linux
 
-This fork targets Apple Silicon and is not tested on Windows or Linux. The torch backend
-still works there — `pip install ".[torch]"` and pass `--backend torch` — but if
-that is your platform you want [the upstream project](https://github.com/santinic/audiblez)
-instead, which supports it properly and has CI for it.
+This fork targets Apple Silicon. Linux is covered by one CI job that installs the
+`[torch]` extra and converts a book end to end, so the fallback is known to work there, but
+it is not a platform this fork optimises for. Windows is not tested at all.
+
+The torch backend is how you run on either — `pip install ".[torch]"` and pass
+`--backend torch` — but if that is your platform you want
+[the upstream project](https://github.com/santinic/audiblez) instead, which supports it
+properly and has CI across all three.
 
 ## Speed
 
@@ -161,6 +185,71 @@ The first letter is the language code and the second is the gender of the speake
 
 For more detaila about voice quality, check this document: [Kokoro-82M voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md)
 
+### Edge voices (online)
+
+The Edge backend uses Microsoft's neural voices — no model download, but it needs network
+and sends the book's text to Microsoft's servers. Pick one with `--backend edge`:
+
+| Language                  | Voices                                                                                                                                                                                                                                     |
+|---------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 🇺🇸 American English     | `en-US-AriaNeural`, `en-US-JennyNeural`, `en-US-GuyNeural`, `en-US-EmmaNeural`, `en-US-BrianNeural`, `en-US-AndrewNeural`, `en-US-ChristopherNeural`, `en-US-MichelleNeural`                                                               |
+| 🇬🇧 British English      | `en-GB-LibbyNeural`, `en-GB-MaisieNeural`, `en-GB-RyanNeural`, `en-GB-SoniaNeural`, `en-GB-ThomasNeural`                                                                                                                                  |
+| 🇦🇺 Australian English   | `en-AU-NatashaNeural`, `en-AU-WilliamMultilingualNeural`                                                                                                                                                                                   |
+| 🇨🇦 Canadian English     | `en-CA-ClaraNeural`, `en-CA-LiamNeural`                                                                                                                                                                                                    |
+| 🇮🇳 Indian English       | `en-IN-NeerjaNeural`, `en-IN-PrabhatNeural`                                                                                                                                                                                                |
+| 🇨🇳 Mandarin (mainland) | `zh-CN-XiaoxiaoNeural`, `zh-CN-XiaoyiNeural`, `zh-CN-YunjianNeural`, `zh-CN-YunxiNeural`, `zh-CN-YunxiaNeural`, `zh-CN-YunyangNeural`                                                                                                     |
+| 🇹🇼 Mandarin (Taiwan)   | `zh-TW-HsiaoChenNeural`, `zh-TW-HsiaoYuNeural`, `zh-TW-YunJheNeural` — reads traditional script natively                                                                                                                                    |
+| 🇭🇰 Cantonese (Hong Kong) | `zh-HK-HiuGaaiNeural`, `zh-HK-HiuMaanNeural`, `zh-HK-WanLungNeural`                                                                                                                                                                       |
+| 🇪🇸 Spanish              | `es-ES-AlvaroNeural`, `es-ES-ElviraNeural`, `es-ES-XimenaNeural`, `es-MX-DaliaNeural`, `es-MX-JorgeNeural`                                                                                                                               |
+| 🇫🇷 French               | `fr-FR-DeniseNeural`, `fr-FR-EloiseNeural`, `fr-FR-HenriNeural`, `fr-FR-RemyMultilingualNeural`, `fr-FR-VivienneMultilingualNeural`                                                                                                       |
+| 🇩🇪 German               | `de-DE-ConradNeural`, `de-DE-KatjaNeural`, `de-DE-FlorianMultilingualNeural`, `de-DE-SeraphinaMultilingualNeural`                                                                                                                         |
+| 🇮🇹 Italian              | `it-IT-DiegoNeural`, `it-IT-ElsaNeural`, `it-IT-IsabellaNeural`                                                                                                                                                                            |
+| 🇯🇵 Japanese             | `ja-JP-KeitaNeural`, `ja-JP-NanamiNeural`                                                                                                                                                                                                   |
+| 🇧🇷 Brazilian Portuguese | `pt-BR-AntonioNeural`, `pt-BR-FranciscaNeural`, `pt-BR-ThalitaMultilingualNeural`                                                                                                                                                          |
+| 🇮🇳 Hindi                | `hi-IN-MadhurNeural`, `hi-IN-SwaraNeural`                                                                                                                                                                                                   |
+
+This is a curated subset of the ~400-voice catalog; any other Edge voice name works if you
+type it in full.
+
+### Traditional Chinese
+
+There is no separate traditional-Chinese voice to pick, in this or any other Kokoro build: a
+voice is a speaker's timbre, and the script a book is printed in is handled before the model
+ever sees the text. What *was* missing is that handling. Kokoro's Chinese front end is jieba
+plus pypinyin, whose dictionaries are keyed on simplified characters, so traditional text fell
+back to character-by-character lookup and lost the two things those dictionaries provide:
+polyphone disambiguation (乾乾淨淨 read as *qián qián jìng jìng* instead of *gān gān jìng
+jìng*) and word segmentation (臺灣的 split as 臺 / 灣的).
+
+The one that hurts most is the aspect particle 著: 她笑著說 is read *xiào **zhù** shuō*
+instead of the neutral-tone *xiào **zhe** shuō*, and that construction turns up in nearly
+every paragraph of a novel.
+
+This fork converts traditional text to simplified before phonemizing it, via OpenCC's `tw2s`
+(chosen over the plainer `t2s` because it is the one that fixes 著 while leaving 著作 and 著名
+alone, and over `tw2sp` because that would also rewrite regional vocabulary — 軟體 into 软件 —
+which changes the author's words rather than their script). Nothing
+is lost in doing so — Mandarin pronunciation does not depend on the script — and the text
+written into the `.m4b` (titles, chapter marks) keeps the book's original characters. It
+happens automatically for any of the `z*` voices; Japanese and Korean books are never
+touched.
+
+One real limitation remains: a traditional-script book is narrated in **Mandarin**. Kokoro
+ships no Cantonese voice, so a Hong Kong text will be read correctly, character for
+character, but in Mandarin.
+
+The Edge backend lifts both halves of that limitation. A `zh-TW` voice reads traditional
+script natively — the conversion above is skipped for it — and `zh-HK` voices are real
+Cantonese. Use them with `--backend edge`:
+
+```
+# Traditional script, read as written, in Mandarin
+audiblez book.epub -v zh-TW-HsiaoChenNeural --backend edge
+
+# Traditional script, read in Cantonese
+audiblez book.epub -v zh-HK-HiuMaanNeural --backend edge
+```
+
 ## Choosing a backend
 
 MLX is used automatically on Apple Silicon. Pick an engine explicitly with `--backend`:
@@ -168,6 +257,7 @@ MLX is used automatically on Apple Silicon. Pick an engine explicitly with `--ba
 ```
 audiblez book.epub -v af_sky --backend mlx     # force MLX (Apple Silicon only)
 audiblez book.epub -v af_sky --backend torch   # force Torch (needs the [torch] extra)
+audiblez book.epub -v zh-TW-HsiaoChenNeural --backend edge   # Microsoft's online TTS (needs the [edge] extra + network)
 audiblez book.epub -v af_sky --backend auto    # default: MLX when available, else Torch
 ```
 
@@ -183,44 +273,6 @@ audiblez book.epub -v af_sky --repo-id mlx-community/Kokoro-82M-8bit
 
 If you have an Nvidia GPU, `--cuda` still selects it for the torch backend. It is ignored on
 Apple Silicon, where MLX already runs on the GPU.
-
-## Choosing a model
-
-Kokoro is the default and what you want for almost every book. Qwen3-TTS CustomVoice is
-available as an opt-in alternative with `--model`, and is **never chosen automatically**:
-
-```
-audiblez book.epub -m qwen3-tts -v ryan             # English
-audiblez book.epub -m qwen3-tts -v serena --lang z  # Chinese
-```
-
-Measured on an M5 Max, same passages, both warmed up:
-
-| | Kokoro | Qwen3-TTS 1.7B |
-| --- | --- | --- |
-| English | 666 chars/sec | 62 chars/sec (~10.7x slower) |
-| Chinese | 150 chars/sec | 27 chars/sec (~5.6x slower) |
-| Voices | 54 (28 English) | 9 (**2** English, 5 Chinese) |
-| Download | 339 MB | 2.9 GB |
-| Peak RAM | 0.8 GB | 3.6 GB |
-
-A 500k-character English novel takes roughly 13 minutes on Kokoro and roughly 2.2 hours on
-Qwen. Chinese is the better case for it: the penalty is about half, and it competes against
-Kokoro's weakest voices rather than its strongest.
-
-Three things to know before using it:
-
-- **`--speed` is ignored.** The model accepts the value and discards it. audiblez warns
-  rather than failing, but the audio always plays at 1.0.
-- **Output is not reproducible.** Qwen samples with a temperature, so re-synthesizing one
-  chapter gives audibly different pacing from its neighbours. audiblez defaults to a lower
-  temperature than the library does to reduce this, but it cannot eliminate it. Kokoro is
-  deterministic.
-- **Loudness varies across speakers** by roughly 2x, so audition at matched volume.
-
-Qwen requires the MLX backend; asking for `--backend torch` with it is an error rather than
-a silent fallback. Language is given by name (`english`, `chinese`, `german`, …) or by the
-Kokoro letter, which is translated for you. Hindi is not supported.
 
 ## What gets read
 
@@ -243,12 +295,26 @@ full stop appended after `。`.
 
 ## Chapters
 
-Books that ship as one enormous XHTML file are split into chapters at the anchors their table
-of contents points to, so the `.m4b` gets real chapter marks. Chapter titles come from the
-book's own table of contents rather than filenames — a book whose files are `0.xhtml`,
-`1.xhtml` … used to produce chapters named `0`, `1`, `2`.
+A chapter is one entry in the e-book's table of contents, not one file. The contents is read
+in spine (reading) order, and a chapter runs from its entry to the next one across however
+many files that takes:
 
-Ordinary one-file-per-chapter books are left alone.
+- **Books split into fragments** — a Calibre-style `index_split_006.html` holding just the
+  heading, then `_008` … `_018` holding the text — become one chapter per contents entry.
+  Files the contents never names are continuations of the chapter before them. One such book
+  went from 209 chapters (one per file, named `index_split_042`) to its actual 18.
+- **Books that ship as one enormous XHTML file** are split at the anchors the contents points
+  to, so the `.m4b` gets real chapter marks instead of one 15-hour track.
+- **Chapter titles come from the contents** rather than filenames — a book whose files are
+  `0.xhtml`, `1.xhtml` … used to produce chapters named `0`, `1`, `2`.
+
+Two things are deliberately left alone. A file that trails the last contents entry in a book
+that otherwise keeps one file per chapter is treated as back matter the contents forgot — an
+index, a notes section — and stays its own chapter rather than being glued onto the end of the
+final one. And a book with no usable contents keeps one chapter per file, as before.
+
+Front and back matter the contents names (`Contents`, `Copyright`, `Index`, `About the
+Author`, …) is listed but left unticked, in the GUI and on the CLI alike.
 
 ## Manually pick chapters to convert
 
@@ -261,7 +327,9 @@ To do so, you can use `--pick` to interactively choose the chapters to convert (
 For all the options available, you can check the help page `audiblez --help`:
 
 ```
-usage: audiblez [-h] [-v VOICE] [-p] [-s SPEED] [-c] [-o FOLDER] epub_file_path
+usage: audiblez [-h] [-v VOICE] [-p] [-s SPEED] [-c] [-o FOLDER]
+                [-b {auto,torch,mlx,edge}] [--lang CODE] [--repo-id REPO]
+                epub_file_path
 
 positional arguments:
   epub_file_path        Path to the epub file
@@ -279,17 +347,19 @@ options:
   -o FOLDER, --output FOLDER
                         Output folder for the audiobook and intermediate files
                         (default: audiobooks/, created if missing)
-  -b {auto,torch,mlx}, --backend {auto,torch,mlx}
+  -b {auto,torch,mlx,edge}, --backend {auto,torch,mlx,edge}
                         TTS engine: mlx is Apple-Silicon only and faster, auto
-                        picks it when available
-  --lang CODE           Kokoro language code (a, b, e, f, h, i, j, p, z).
-                        Defaults to the first letter of the voice name; set it
-                        when using a custom .pt voice
+                        picks it when available; edge is Microsoft's online TTS
+                        (needs network)
+  --lang CODE           Language code: Kokoro (a, b, e, f, h, i, j, p, z) or an
+                        Edge locale (en-US, zh-TW, zh-HK, ...). Defaults to the
+                        first letter of the voice name, or the locale for an Edge
+                        voice; set it when using a custom .pt voice
   --repo-id REPO        Hugging Face model repo to use instead of the backend
                         default
 
 example:
-  audiblez book.epub -l en-us -v af_sky
+  audiblez book.epub -v af_sky
 
 to run GUI just run:
   audiblez-ui
@@ -297,7 +367,7 @@ to run GUI just run:
 
 ## Voices beyond the built-in list
 
-Kokoro's `load_voice` accepts more than the names above, and both backends pass it through:
+Kokoro's `load_voice` accepts more than the names above, and both Kokoro backends pass it through:
 
 ```
 audiblez book.epub -v af_heart,af_bella          # blend two voices (averaged)
@@ -313,5 +383,5 @@ Upstream audiblez by [Claudio Santini](https://claudio.uk) in 2025, distributed 
 Related Article: [Audiblez v4: Generate Audiobooks from E-books](https://claudio.uk/posts/audiblez-v4.html)
 
 This Apple Silicon / MLX fork is maintained separately at
-[simgsr/audiblez_mlx](https://github.com/simgsr/audiblez_mlx), under the same MIT licence.
+[simgsr/audiblez-mlx](https://github.com/simgsr/audiblez-mlx), under the same MIT licence.
 MLX inference via [mlx-audio](https://github.com/Blaizzy/mlx-audio).

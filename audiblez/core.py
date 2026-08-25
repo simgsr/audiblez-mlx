@@ -4,6 +4,7 @@
 # Kokoro-82M model for high-quality text-to-speech synthesis.
 # by Claudio Santini 2025 - https://claudio.uk
 import os
+import threading
 import traceback
 from glob import glob
 
@@ -26,8 +27,10 @@ from ebooklib import epub
 from pick import pick
 
 from audiblez import DEFAULT_OUTPUT_FOLDER
-from audiblez.backends import (DEFAULT_MODEL, default_lang_code, get_pipeline,
-                               initial_chars_per_sec, resolve_backend)
+from audiblez import chinese
+from audiblez import power
+from audiblez.backends import EdgeNoAudio, EdgePipeline, get_pipeline, initial_chars_per_sec, resolve_backend
+from audiblez.voices import lang_code_for
 
 sample_rate = 24000
 
@@ -76,10 +79,12 @@ def set_espeak_library():
         print("On Linux: sudo apt install espeak-ng")
 
 
+@power.keep_awake()  # a book takes hours; don't let an idle machine suspend halfway
 def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FOLDER,
          max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
-         backend='auto', lang_code=None, repo_id=None, model=DEFAULT_MODEL):
+         backend='auto', lang_code=None, repo_id=None):
     if post_event: post_event('CORE_STARTED')
+    chinese.reset_notice()  # the GUI stays open across books; each run gets its own notice
     load_spacy()
     Path(output_folder).mkdir(parents=True, exist_ok=True)
 
@@ -118,7 +123,7 @@ def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FO
         # Only characters actually sent to the model, which is what the rate must be based on:
         # chapters skipped because their .wav already exists cost no time.
         synthesized_chars=0,
-        chars_per_sec=initial_chars_per_sec(backend, lang_code or voice[:1], model),
+        chars_per_sec=initial_chars_per_sec(backend, lang_code_for(voice, lang_code)),
         start_time=time.time())
     print('Started at:', time.strftime('%H:%M:%S'))
     print(f'Total characters: {stats.total_chars:,}')
@@ -126,11 +131,9 @@ def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FO
     eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
     print(f'Estimated time remaining (assuming {stats.chars_per_sec} chars/sec): {eta}')
     set_espeak_library()
-    # Kokoro encodes the language in the voice name ('af_sky' -> 'a'); Qwen speakers do not.
-    lang_code = lang_code or default_lang_code(voice, model)
-    print(f'Using the {resolved_backend} backend with the {model} model.')
-    pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id,
-                            model=model)
+    lang_code = lang_code_for(voice, lang_code)  # 'a' for american, 'zh-TW' for an Edge voice, etc.
+    print(f'Using the {resolved_backend} backend.')
+    pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id)
 
     chapter_wav_files = []
     chapter_titles = {}
@@ -157,9 +160,17 @@ def main(file_path, voice, pick_manually, speed, output_folder=DEFAULT_OUTPUT_FO
             text = f'{title} – {creator}.\n\n' + text
         start_time = time.time()
         if post_event: post_event('CORE_CHAPTER_STARTED', chapter_index=chapter.chapter_index)
-        audio_segments = gen_audio_segments(
-            pipeline, text, voice, speed, stats, post_event=post_event, max_sentences=max_sentences,
-            lang_code=lang_code)
+        try:
+            audio_segments = gen_audio_segments(
+                pipeline, text, voice, speed, stats, post_event=post_event, max_sentences=max_sentences,
+                lang_code=lang_code)
+        except EdgeNoAudio as e:
+            # Write nothing for this chapter. A .wav on disk is what makes the next run
+            # skip a chapter, so writing a truncated one here would bake the missing
+            # speech in for good; leaving it absent lets a re-run try the chapter again.
+            print(f'Warning: chapter {i} is incomplete and was not written: {e}')
+            chapter_wav_files.remove(chapter_wav_path)
+            continue
         if audio_segments:
             final_audio = np.concatenate(audio_segments)
             soundfile.write(chapter_wav_path, final_audio, sample_rate)
@@ -205,7 +216,7 @@ def find_cover(book):
 def print_selected_chapters(document_chapters, chapters):
     ok = 'X' if platform.system() == 'Windows' else '✅'
     print(tabulate([
-        [i, c.get_name(), len(c.extracted_text), ok if c in chapters else '', chapter_beginning_one_liner(c)]
+        [i, chapter_display_name(c), len(c.extracted_text), ok if c in chapters else '', chapter_beginning_one_liner(c)]
         for i, c in enumerate(document_chapters, start=1)
     ], headers=['#', 'Chapter', 'Text Length', 'Selected', 'First words']))
 
@@ -249,17 +260,77 @@ def measured_chars_per_sec(stats):
     return synthesized / elapsed
 
 
+_sentencizer = None
+# audiblez/ui.py can run gen_audio_segments from two threads at once -- the main
+# book-synthesis thread and a chapter-preview thread -- and the sentencizer below is now a
+# single instance shared across every call rather than one built fresh per call. spaCy's
+# Language objects (this one includes a tok2vec/NER component, not just the rule-based
+# sentencizer) are not documented as safe for concurrent nlp(text) calls, so both the lazy
+# load and every use of the pipeline are serialized through this lock.
+_sentencizer_lock = threading.Lock()
+
+
+def _get_sentencizer():
+    """The spaCy sentencizer, loaded once per process.
+
+    gen_audio_segments used to load it fresh on every call, i.e. once per chapter --
+    harmless for a handful of chapters but wasted load time repeated over a book with
+    hundreds of them, for a component that carries no per-chapter state.
+    """
+    global _sentencizer
+    if _sentencizer is None:
+        _sentencizer = spacy.load('xx_ent_wiki_sm')
+        _sentencizer.add_pipe('sentencizer')
+    return _sentencizer
+
+
+# Edge pays a full network round trip -- websocket handshake plus streamed synthesis --
+# for every pipeline call, so at one call per sentence a book with thousands of short
+# sentences becomes thousands of serial round trips, most of that wall time spent waiting
+# rather than synthesizing. Kokoro has no such per-call overhead worth amortizing, and
+# batching would fight the manual long-sentence split it already needs (backends.py), so
+# this only applies to pipelines that opt in via `batch_chars` (currently just Edge).
+EDGE_BATCH_CHARS = EdgePipeline.batch_chars
+
+
+def _batch_for_edge(sentences, max_chars=EDGE_BATCH_CHARS):
+    """Group consecutive sentences into chunks up to `max_chars`, for one Edge call each.
+
+    A sentence larger than `max_chars` still gets its own chunk rather than being split
+    further -- Edge has no length limit worth working around, unlike Kokoro.
+    """
+    batches = []
+    current = []
+    current_len = 0
+    for sent in sentences:
+        if current and current_len + len(sent) > max_chars:
+            batches.append(current)
+            current = []
+            current_len = 0
+        current.append(sent)
+        current_len += len(sent)
+    if current:
+        batches.append(current)
+    return batches
+
+
 def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None,
                        lang_code=None):
-    nlp = spacy.load('xx_ent_wiki_sm')
-    nlp.add_pipe('sentencizer')
+    nlp = _get_sentencizer()
     audio_segments = []
-    doc = nlp(text)
-    lang_code = lang_code or voice[0]
+    lang_code = lang_code_for(voice, lang_code)
+    # Before sentence splitting, so the segmenter sees the same characters the model will.
+    text = chinese.normalize(text, lang_code, notify=print)
+    # Locked: this nlp is a single instance shared across every call (see _get_sentencizer),
+    # and gen_audio_segments can run concurrently from more than one thread (audiblez/ui.py
+    # runs book synthesis and chapter preview on separate threads), so calls into it are
+    # serialized rather than racing on its internal state.
+    with _sentencizer_lock:
+        doc = nlp(text)
 
-    # Tuple membership, not `in 'ab'`: the substring form also matched '' and 'ab'.
-    # Anything else -- other Kokoro languages, and every Qwen language name -- gets the
-    # manual split, which autoregressive models want anyway to stay inside max_tokens.
+    # Tuple membership, not `in 'ab'`: the substring form also matched '' and 'ab', so a
+    # missing language code silently took the English path and skipped the long-sentence
+    # split that every other language depends on.
     if lang_code in ('a', 'b'):
         sentences = [s.text for s in doc.sents]
     else:
@@ -273,13 +344,38 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
             else:
                 sentences.append(sent.text)
 
-    for i, sent_text in enumerate(sentences):
-        if max_sentences and i > max_sentences: break
-        for gs, ps, audio in pipeline(sent_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
+    # Cap the sentence list itself, before batching, so the cap bounds how much text is
+    # actually synthesized regardless of how the pipeline groups sentences into calls. A
+    # post-hoc break on sent_count (the previous approach) is meaningless once a backend can
+    # fold many sentences into one chunk: sent_count would still read 0 when the first,
+    # possibly large, chunk gets synthesized. `+ 1` preserves the previous one-call-per-
+    # sentence behavior of stopping just after the max_sentences'th sentence.
+    if max_sentences is not None:
+        sentences = sentences[:max_sentences + 1]
+
+    # A pipeline opts into batching by exposing `batch_chars` (currently just EdgePipeline);
+    # every other pipeline keeps the existing one-call-per-sentence behavior (singleton
+    # "batches"). This amortizes Edge's per-call network round trip over several sentences.
+    batch_chars = getattr(pipeline, 'batch_chars', None)
+    if batch_chars:
+        chunks = _batch_for_edge(sentences, max_chars=batch_chars)
+    else:
+        chunks = [[s] for s in sentences]
+
+    # Deliberately serial, chunk by chunk, even though the chunks are independent and this
+    # leaves Edge's round-trip latency on the critical path: EdgePipeline's own retry logic
+    # (backends.py) exists because Edge silently throttles -- returns empty audio -- when
+    # requests are issued back to back. Dispatching chunks concurrently would fire exactly
+    # that pattern on purpose, trading network wait for more throttling and retries.
+    for chunk in chunks:
+        # Every sentence is stripped before joining, singleton chunks included, so a chunk's
+        # text depends only on the sentences it contains, never on how batching grouped them.
+        chunk_text = ' '.join(s.strip() for s in chunk)
+        for gs, ps, audio in pipeline(chunk_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
             audio_segments.append(audio)
         if stats:
-            stats.processed_chars += len(sent_text)
-            stats.synthesized_chars = getattr(stats, 'synthesized_chars', 0) + len(sent_text)
+            stats.processed_chars += len(chunk_text)
+            stats.synthesized_chars = getattr(stats, 'synthesized_chars', 0) + len(chunk_text)
             stats.progress = stats.processed_chars * 100 // stats.total_chars
             stats.chars_per_sec = measured_chars_per_sec(stats)
             stats.eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
@@ -290,11 +386,12 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
 
 
 def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False,
-             backend='auto', lang_code=None, repo_id=None, model=DEFAULT_MODEL):
-    lang_code = lang_code or default_lang_code(voice, model)
+             backend='auto', lang_code=None, repo_id=None):
+    # Not voice[:1]: that reads 'zh-TW-HsiaoChenNeural' as 'z', which sends a Taiwan voice
+    # -- one that reads traditional script natively -- down the simplify-first path.
+    lang_code = lang_code_for(voice, lang_code)
     set_espeak_library()
-    pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id,
-                            model=model)
+    pipeline = get_pipeline(voice, lang_code=lang_code, backend=backend, repo_id=repo_id)
     load_spacy()
     audio_segments = gen_audio_segments(pipeline, text, voice=voice, speed=speed, lang_code=lang_code)
     final_audio = np.concatenate(audio_segments)
@@ -344,7 +441,7 @@ MIN_LENGTH_TO_SPLIT = 60_000
 # Table-of-contents titles that mark front/back matter rather than a chapter to narrate.
 FRONT_MATTER_TITLES = {
     'content', 'contents', 'table of contents', 'toc', 'index', 'copyright', 'copyright page', 'colophon',
-    'acknowledgements', 'acknowledgments', 'bibliography', 'notes', 'endnotes', 'footnotes',
+    'acknowledgements', 'acknowledgments', 'bibliography', 'references', 'notes', 'endnotes', 'footnotes',
     'glossary', 'about the author', 'about the publisher', 'cover', 'title page', 'half title',
     '目录', '目錄', '版权', '版權', '版权页', '版權頁', '索引', '注释', '註釋', '附录', '附錄',
     '参考文献', '參考文獻', '封面', '扉页', '扉頁', '书名页', '書名頁',
@@ -601,31 +698,107 @@ def chapter_display_name(chapter):
     return getattr(chapter, 'title', '') or chapter.get_name()
 
 
-def find_document_chapters_and_extract_texts(book):
-    """Returns every chapter that is an ITEM_DOCUMENT and enriches each chapter with extracted_text.
+def spine_documents(book):
+    """Every ITEM_DOCUMENT in reading order.
 
-    A book delivered as one big document is split into a chapter per table-of-contents anchor.
+    book.get_items() yields the manifest, whose order is arbitrary; the spine is what the
+    reader (and therefore the table of contents) follows. Anything the spine omits is kept,
+    in manifest order, after the documents it does list.
     """
-    entries_by_file = toc_entries_by_file(book)
-    extracted = []
-    for chapter in book.get_items():
-        if chapter.get_type() != ebooklib.ITEM_DOCUMENT:
-            continue
-        entries = toc_entries_for(chapter.get_name(), entries_by_file)
-        anchors = [anchor for anchor, _ in entries if anchor]
-        sections = extract_sections_from_html(chapter.get_body_content(), anchors)
-        extracted.append((chapter, entries, sections))
+    documents = [item for item in book.get_items() if item.get_type() == ebooklib.ITEM_DOCUMENT]
+    spine = getattr(book, 'spine', None) or []
+    if not spine:
+        return documents
 
-    substantial = sum(1 for _, _, sections in extracted
+    by_id = {}
+    for document in documents:
+        by_id.setdefault(document.get_id(), document)
+
+    ordered, seen = [], set()
+    for entry in spine:
+        idref = entry[0] if isinstance(entry, (tuple, list)) else entry  # ('idref', 'yes'), or a bare idref
+        if not isinstance(idref, str):
+            idref = getattr(idref, 'id', '')  # or the item itself, when the book was built in memory
+        document = by_id.get(idref)
+        if document is not None and id(document) not in seen:
+            ordered.append(document)
+            seen.add(id(document))
+    ordered.extend(d for d in documents if id(d) not in seen)
+    return ordered
+
+
+def read_documents(book, entries_by_file):
+    """Read every document once, cut into (anchor, text) sections at its own table-of-contents anchors."""
+    read = []
+    for document in spine_documents(book):
+        entries = toc_entries_for(document.get_name(), entries_by_file)
+        anchors = [anchor for anchor, _ in entries if anchor]
+        sections = extract_sections_from_html(document.get_body_content(), anchors)
+        read.append((document, entries, sections))
+    return read
+
+
+def toc_driven_chapters(read):
+    """Cut the book where its table of contents says the chapters are.
+
+    A chapter starts at every entry in the contents, and runs until the next one -- across as
+    many documents as that takes. Publishers routinely spill one chapter over a dozen files
+    (index_split_006.html holding nothing but the heading, _008 to _018 the text), so a
+    document the contents never names is a continuation of the chapter before it, not a
+    chapter of its own. The same walk splits the opposite kind of book, where the contents
+    points at several anchors inside one big document.
+
+    Returns [] when the contents is missing or too thin to segment the book, leaving the
+    caller to fall back to one chapter per document.
+    """
+    if sum(len(entries) for _, entries, _ in read) < 2:
+        return []  # no contents, or one that names a single place: nothing to segment by
+    named = {i for i, (_, entries, _) in enumerate(read) if entries}
+    # Does this book spill chapters over several files at all? If every entry in the contents
+    # is followed straight away by the next one, it keeps one file per chapter, and a document
+    # trailing the last entry is back matter the contents forgot -- an index or a notes
+    # section -- which must not be glued onto the end of the final chapter. If instead the
+    # book already runs chapters across unnamed files, a trailing unnamed file is just more
+    # of the last chapter.
+    spills_over_files = any(i not in named for i in range(min(named), max(named)))
+    last_named = len(read) if spills_over_files else max(named)
+
+    chapters = []
+    for index, (document, entries, sections) in enumerate(read):
+        titles = dict(entries)
+        for anchor, text in sections:
+            if not text.strip():
+                continue  # an inline table of contents: nothing left once navigation is dropped
+            title = titles.get(anchor or '')
+            if title is None:
+                if chapters and index <= last_named:
+                    chapters[-1].extracted_text += text
+                    continue
+                title = chapter_display_name(document)
+            elif (chapters and chapters[-1].source is document
+                  and len(chapters[-1].extracted_text.strip()) < MIN_SECTION_LENGTH):
+                # A bare "Chapter 4" divider at its own anchor, just before the anchor holding
+                # the text: merge, keeping the divider's words and title, rather than making a
+                # two-second chapter of it. Only within one document -- across documents a
+                # short chapter (a dedication, say) is a real chapter.
+                chapters[-1].extracted_text += text
+                continue
+            chapters.append(SplitChapter(document, anchor, title, text))
+    return chapters if len(chapters) > 1 else []
+
+
+def per_document_chapters(read, entries_by_file):
+    """One chapter per document: the fallback for books without a usable table of contents.
+
+    A book delivered as one big document is still split into a chapter per contents anchor,
+    since leaving it whole would produce a single unusable chapter.
+    """
+    substantial = sum(1 for _, _, sections in read
                       if sum(len(text.strip()) for _, text in sections) > MIN_SECTION_LENGTH)
 
     document_chapters = []
-    for chapter, entries, sections in extracted:
+    for chapter, entries, sections in read:
         full_text = ''.join(text for _, text in sections)
-        # Split only books that really are one big file: either this is the book's only
-        # document, or it is long enough that leaving it whole would produce an unusable
-        # single chapter. Ordinary per-chapter files keep their existing one-file-one-chapter
-        # behaviour even when the table of contents points at sections inside them.
         should_split = (len(sections) > 1
                         and (substantial <= 1 or len(full_text) > MIN_LENGTH_TO_SPLIT))
         if should_split:
@@ -642,6 +815,24 @@ def find_document_chapters_and_extract_texts(book):
         if not getattr(chapter, 'title', '') and entries:
             chapter.title = entries[0][1]
         document_chapters.append(chapter)
+    return document_chapters
+
+
+def find_document_chapters_and_extract_texts(book):
+    """Returns the book's chapters, each enriched with extracted_text.
+
+    The table of contents decides where the chapters are; documents are only the unit when
+    the book has no contents worth following.
+    """
+    entries_by_file = toc_entries_by_file(book)
+    read = read_documents(book, entries_by_file)
+
+    document_chapters = toc_driven_chapters(read)
+    if document_chapters:
+        print(f'Following the table of contents: {len(read)} documents, '
+              f'{len(document_chapters)} chapters.')
+    else:
+        document_chapters = per_document_chapters(read, entries_by_file)
 
     for i, c in enumerate(document_chapters):
         c.chapter_index = i  # this is used in the UI to identify chapters

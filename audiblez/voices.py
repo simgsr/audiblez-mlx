@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 import platform
+import re
 
-flags = {'a': '🇺🇸', 'b': '🇬🇧', 'e': '🇪🇸', 'f': '🇫🇷', 'h': '🇮🇳', 'i': '🇮🇹', 'j': '🇯🇵', 'p': '🇧🇷', 'z': '🇨🇳',
-         'k': '🇰🇷', 'd': '🇩🇪', 'r': '🇷🇺'}
+flags = {'a': '🇺🇸', 'b': '🇬🇧', 'e': '🇪🇸', 'f': '🇫🇷', 'h': '🇮🇳', 'i': '🇮🇹', 'j': '🇯🇵', 'p': '🇧🇷', 'z': '🇨🇳'}
 
 flags_win = {'a': 'american', 'b': 'british', 'e': 'spanish', 'f': 'french', 'h': 'hindi', 'i': 'italian',
-             'j': 'japanese', 'p': 'portuguese', 'z': 'chinese', 'k': 'korean', 'd': 'german', 'r': 'russian'}
+             'j': 'japanese', 'p': 'portuguese', 'z': 'chinese'}
 
 voices = {
     'a': ['af_alloy', 'af_aoede', 'af_bella', 'af_heart', 'af_jessica', 'af_kore', 'af_nicole', 'af_nova',
@@ -22,58 +22,114 @@ voices = {
           'zm_yunyang']
 }
 
-# Qwen3-TTS CustomVoice ships nine fixed speakers -- no blending, no .pt packs, no cloning.
-# Names are the model's own lowercase ids (get_supported_speakers()); it matches them
-# case-insensitively. Grouped by the speaker's native language, which is what the model
-# card recommends using them for, though each can speak any supported language.
-#
-# Note how thin the English side is: two speakers, against Kokoro's 28.
-qwen_voices = {
-    'a': ['ryan', 'aiden'],
-    'z': ['serena', 'vivian', 'uncle_fu', 'eric', 'dylan'],
-    'j': ['ono_anna'],
-    'k': ['sohee'],
+# Microsoft Edge's online TTS voices, keyed by locale. A curated subset of the ~400-voice
+# catalog: the languages Kokoro already supports plus the Chinese variants that matter
+# (zh-TW reads traditional script natively, zh-HK is real Cantonese). Voices outside this
+# list are still usable by typing the name -- the dropdown stays editable.
+edge_voices = {
+    'en-US': ['en-US-AriaNeural', 'en-US-JennyNeural', 'en-US-GuyNeural',
+              'en-US-EmmaNeural', 'en-US-BrianNeural', 'en-US-AndrewNeural',
+              'en-US-ChristopherNeural', 'en-US-MichelleNeural'],
+    'en-GB': ['en-GB-LibbyNeural', 'en-GB-MaisieNeural', 'en-GB-RyanNeural',
+              'en-GB-SoniaNeural', 'en-GB-ThomasNeural'],
+    'en-AU': ['en-AU-NatashaNeural', 'en-AU-WilliamMultilingualNeural'],
+    'en-CA': ['en-CA-ClaraNeural', 'en-CA-LiamNeural'],
+    'en-IN': ['en-IN-NeerjaNeural', 'en-IN-PrabhatNeural'],
+    'zh-CN': ['zh-CN-XiaoxiaoNeural', 'zh-CN-XiaoyiNeural', 'zh-CN-YunjianNeural',
+              'zh-CN-YunxiNeural', 'zh-CN-YunxiaNeural', 'zh-CN-YunyangNeural'],
+    'zh-TW': ['zh-TW-HsiaoChenNeural', 'zh-TW-HsiaoYuNeural', 'zh-TW-YunJheNeural'],
+    'zh-HK': ['zh-HK-HiuGaaiNeural', 'zh-HK-HiuMaanNeural', 'zh-HK-WanLungNeural'],
+    'es-ES': ['es-ES-AlvaroNeural', 'es-ES-ElviraNeural', 'es-ES-XimenaNeural'],
+    'es-MX': ['es-MX-DaliaNeural', 'es-MX-JorgeNeural'],
+    'fr-FR': ['fr-FR-DeniseNeural', 'fr-FR-EloiseNeural', 'fr-FR-HenriNeural',
+              'fr-FR-RemyMultilingualNeural', 'fr-FR-VivienneMultilingualNeural'],
+    'de-DE': ['de-DE-ConradNeural', 'de-DE-KatjaNeural', 'de-DE-FlorianMultilingualNeural',
+              'de-DE-SeraphinaMultilingualNeural'],
+    'it-IT': ['it-IT-DiegoNeural', 'it-IT-ElsaNeural', 'it-IT-IsabellaNeural'],
+    'ja-JP': ['ja-JP-KeitaNeural', 'ja-JP-NanamiNeural'],
+    'pt-BR': ['pt-BR-AntonioNeural', 'pt-BR-FranciscaNeural', 'pt-BR-ThalitaMultilingualNeural'],
+    'hi-IN': ['hi-IN-MadhurNeural', 'hi-IN-SwaraNeural'],
 }
 
-VOICES_BY_MODEL = {
-    'kokoro': voices,
-    'qwen3-tts': qwen_voices,
+edge_flags = {
+    'en-US': '🇺🇸', 'en-GB': '🇬🇧', 'en-AU': '🇦🇺', 'en-CA': '🇨🇦', 'en-IN': '🇮🇳',
+    'zh-CN': '🇨🇳', 'zh-TW': '🇹🇼', 'zh-HK': '🇭🇰',
+    'es-ES': '🇪🇸', 'es-MX': '🇲🇽', 'fr-FR': '🇫🇷', 'de-DE': '🇩🇪', 'it-IT': '🇮🇹',
+    'ja-JP': '🇯🇵', 'pt-BR': '🇧🇷', 'hi-IN': '🇮🇳',
 }
 
+# Edge voice names carry their locale: 'zh-TW-HsiaoChenNeural'. Kokoro names ('af_sky'),
+# blends ('af_heart,af_bella') and .pt paths never match.
+# Deliberately the same pattern edge-tts validates against (edge_tts/data_classes.py):
+# subtags are not always two letters -- 'yue-CN-XiaoMinNeural' and 'fil-PH-AngeloNeural'
+# are real voices, and a stricter {2} rejected them before the request was ever made.
+_EDGE_VOICE_RE = re.compile(r'^[a-z]{2,}-[A-Z]{2,}-.+Neural$')
 
-def voices_for(model='kokoro'):
-    """The voice table for a model, keyed by language code.
+# Ticked by default in the GUI's language filter. Ticking every language put all 9 Kokoro
+# languages -- or all 16 Edge locales, ~50 voices -- into one dropdown, burying the handful
+# anyone actually narrates in. The rest stay one click away.
+DEFAULT_LANGUAGES = frozenset({'a', 'b', 'z'})   # Kokoro: american, british, chinese
+# Named one by one rather than by 'en-'/'zh-' prefix: the prefix form also ticked en-AU,
+# en-CA, en-IN and zh-HK, which is more choice than the dropdown wants by default. The
+# remaining locales are still offered, just unticked.
+DEFAULT_LOCALES = frozenset({'en-US', 'en-GB', 'zh-CN', 'zh-TW'})
 
-    One source of truth for the CLI epilog and the GUI dropdown, so neither grows its own
-    conditional as models are added.
+
+def is_default_language(code):
+    """True for the codes ticked on startup, in either naming scheme.
+
+    Kokoro codes are single letters and Edge codes are 'en-US'-shaped, and the two sets
+    cannot collide, so one predicate covers both: the caller does not need to know which
+    backend is selected.
     """
-    try:
-        return VOICES_BY_MODEL[model]
-    except KeyError:
-        raise ValueError(f"Unknown model {model!r}. Choose one of: {', '.join(VOICES_BY_MODEL)}")
+    return code in DEFAULT_LANGUAGES or code in DEFAULT_LOCALES
 
 
-def flat_voices(model='kokoro'):
-    """Every voice for a model, in dropdown order."""
-    return [v for lang in voices_for(model) for v in voices_for(model)[lang]]
+def default_languages(codes):
+    """The subset of `codes` ticked on startup, or all of them if none qualify.
 
-
-def voice_language(voice, model='kokoro'):
-    """The language code a voice belongs to, or None if it is not a known voice.
-
-    Kokoro voices encode it in the name; Qwen speakers do not, so they need the lookup.
+    The fallback matters for a backend whose codes are named some third way: better to
+    open with everything ticked than with an empty voice dropdown.
     """
-    for lang, names in voices_for(model).items():
-        if voice.lower() in [n.lower() for n in names]:
-            return lang
-    return None
+    chosen = {c for c in codes if is_default_language(c)}
+    return chosen or set(codes)
 
 
-def describe_voices(model='kokoro'):
-    """Voice list formatted for CLI help, one line per language."""
-    labels = flags_win if platform.system() == 'Windows' else flags
-    table = voices_for(model)
-    return '\n'.join(f'  {labels.get(lang, lang)}:\t{", ".join(table[lang])}' for lang in table)
+def is_edge_voice(voice):
+    """True when `voice` names an Edge TTS voice rather than a Kokoro one."""
+    return bool(voice) and bool(_EDGE_VOICE_RE.match(voice))
 
 
-available_voices_str = describe_voices('kokoro')
+def is_catalog_voice(voice):
+    """True when `voice` is one audiblez lists, rather than one the user typed in.
+
+    A .pt path, a blend and an Edge voice outside the curated locales are all legal to
+    type but appear in no list, so callers must not treat their absence as "gone".
+    """
+    if not voice:
+        return False
+    return (any(voice in names for names in voices.values())
+            or any(voice in names for names in edge_voices.values()))
+
+
+def lang_code_for(voice, lang_code=None):
+    """The language code `voice` narrates in.
+
+    An explicit code wins. Edge voices carry their locale in the name
+    ('zh-TW-HsiaoChenNeural' -> 'zh-TW'); Kokoro voices use the first letter
+    ('af_sky' -> 'a'). A .pt path has no language in the name, so callers pass
+    --lang explicitly for those.
+    """
+    if lang_code:
+        return lang_code
+    if is_edge_voice(voice):
+        return '-'.join(voice.split('-')[:2])
+    return voice[0] if voice else ''
+
+
+if platform.system() == 'Windows':
+    available_voices_str = '\n'.join([f'  {flags_win[lang]}:\t{", ".join(voices[lang])}' for lang in voices])
+    edge_voices_str = '\n'.join([f'  {locale}:\t{", ".join(edge_voices[locale])}' for locale in edge_voices])
+else:
+    available_voices_str = '\n'.join([f'  {flags[lang]}:\t{", ".join(voices[lang])}' for lang in voices])
+    edge_voices_str = '\n'.join([f'  {edge_flags[locale]} {locale}:\t{", ".join(edge_voices[locale])}' for locale in edge_voices])

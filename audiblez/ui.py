@@ -7,6 +7,7 @@ import soundfile
 import threading
 import platform
 import subprocess
+import traceback
 import io
 import os
 import wx
@@ -17,52 +18,101 @@ from tempfile import NamedTemporaryFile
 from pathlib import Path
 
 from audiblez import DEFAULT_OUTPUT_FOLDER
-from audiblez.backends import (DEFAULT_MODEL, MODELS, default_lang_code, mlx_available,
-                               resolve_backend, torch_available)
-from audiblez.voices import flags, voices_for
-
-# Shown under the Model dropdown. The cost of the slow model has to be visible *before*
-# a multi-hour run starts, not discovered by watching a progress bar all evening.
-MODEL_NOTES = {
-    'kokoro': '54 voices, fast (~666 chars/sec English, ~150 Chinese)',
-    'qwen3-tts': '9 voices, expressive — but ~10x slower (~2h for a novel), 2.9 GB download',
-}
+from audiblez.backends import edge_available, mlx_available, resolve_backend, torch_available
+from audiblez.voices import (voices, flags, edge_voices, edge_flags, lang_code_for,
+                             default_languages, is_catalog_voice)
 
 EVENTS = {
     'CORE_STARTED': NewEvent(),
     'CORE_PROGRESS': NewEvent(),
     'CORE_CHAPTER_STARTED': NewEvent(),
     'CORE_CHAPTER_FINISHED': NewEvent(),
-    'CORE_FINISHED': NewEvent()
+    'CORE_FINISHED': NewEvent(),
+    # Synthesis raised. Without this the worker thread died with its traceback on a terminal
+    # nobody is looking at, leaving the window frozen mid-run with no way back.
+    'CORE_FAILED': NewEvent(),
 }
 
 border = 5
 
+# The pixel sizes in this file were picked on a 14" laptop; ui_scale stretches or shrinks
+# them so the same layout fits a small screen and still uses the room on a large one.
+REFERENCE_SCREEN_WIDTH = 1512
+
+
+def current_display():
+    """The display the pointer is on, falling back to the primary one."""
+    index = wx.Display.GetFromPoint(wx.GetMousePosition())
+    return wx.Display(index if index != wx.NOT_FOUND else 0)
+
 
 class MainWindow(wx.Frame):
     def __init__(self, parent, title):
-        screen_width, screen_h = wx.GetDisplaySize()
-        self.window_width = int(screen_width * 0.6)
-        super().__init__(parent, title=title, size=(self.window_width, self.window_width * 3 // 4))
+        # The *usable* rectangle of the display: unlike wx.GetDisplaySize() this leaves out
+        # the macOS menu bar and dock, and the Windows taskbar.
+        self.work_area = current_display().GetClientArea()
+        self.ui_scale = min(max(self.work_area.width / REFERENCE_SCREEN_WIDTH, 0.72), 1.5)
+        window_width = min(int(self.work_area.width * 0.9), self.scaled(1400))
+        window_height = min(int(self.work_area.height * 0.9), window_width * 3 // 4)
+        super().__init__(parent, title=title, size=(window_width, window_height))
+        # The floor only ever shrinks: a big monitor is no reason to stop someone making
+        # the window small, but a small screen must be able to hold the whole frame.
+        shrink = min(self.ui_scale, 1.0)
+        self.SetMinSize((min(int(820 * shrink), self.work_area.width),
+                         min(int(560 * shrink), self.work_area.height)))
         self.chapters_panel = None
         self.preview_threads = []
         self.selected_chapter = None
         self.selected_book = None
         self.synthesis_in_progress = False
-        # The params panel only exists once a book is open, so these need a value before it.
-        self.selected_backend = 'auto'
-        self.selected_model = DEFAULT_MODEL
+        self.selected_backend = 'auto'  # the params panel only exists once a book is open
 
         self.Bind(EVENTS['CORE_STARTED'][1], self.on_core_started)
         self.Bind(EVENTS['CORE_CHAPTER_STARTED'][1], self.on_core_chapter_started)
         self.Bind(EVENTS['CORE_CHAPTER_FINISHED'][1], self.on_core_chapter_finished)
         self.Bind(EVENTS['CORE_PROGRESS'][1], self.on_core_progress)
         self.Bind(EVENTS['CORE_FINISHED'][1], self.on_core_finished)
+        self.Bind(EVENTS['CORE_FAILED'][1], self.on_core_failed)
 
         self.create_menu()
         self.create_layout()
-        self.Centre()
+        self.centre_on_work_area()
         self.Show(True)
+
+    def scaled(self, size):
+        """A pixel size from the reference layout, adjusted for this screen."""
+        return int(round(size * self.ui_scale))
+
+    def centre_on_work_area(self):
+        """Centre in the usable area, so the title bar never hides under the menu bar."""
+        width, height = self.GetSize()
+        self.SetPosition((self.work_area.x + max(0, (self.work_area.width - width) // 2),
+                          self.work_area.y + max(0, (self.work_area.height - height) // 2)))
+
+    def fit_to_work_area(self):
+        """Grow to what the loaded book's layout needs, but never past the usable screen.
+
+        Opening a book adds the chapter table and the parameters column, which need more
+        room than the empty window; without this the extra panels are simply cut off.
+        """
+        best, current = self.GetBestSize(), self.GetSize()
+        height_wanted = best.height
+        if self.chapters_panel is not None:
+            # The parameters column can always scroll, so it reports a tiny best height and
+            # never asks the frame for room. Ask its sizer what it would rather have, and
+            # give it that much whenever the screen has it to spare.
+            chrome = current.height - self.right_panel.GetSize().height
+            height_wanted = max(height_wanted, self.right_panel.GetSizer().CalcMin().height + chrome)
+        width = min(max(best.width, current.width), self.work_area.width)
+        height = min(max(height_wanted, current.height), self.work_area.height)
+        if (width, height) != tuple(current):
+            self.SetSize(width, height)
+            self.Layout()
+        # Only pull the window back if it now hangs off the screen: otherwise leave it
+        # wherever the user dragged it.
+        x, y = self.GetPosition()
+        self.SetPosition((min(max(x, self.work_area.x), self.work_area.x + self.work_area.width - width),
+                          min(max(y, self.work_area.y), self.work_area.y + self.work_area.height - height)))
 
     def create_menu(self):
         menubar = wx.MenuBar()
@@ -107,6 +157,29 @@ class MainWindow(wx.Frame):
     def on_core_finished(self, event):
         self.synthesis_in_progress = False
         self.open_folder_with_explorer(self.output_folder_text_ctrl.GetValue())
+
+    def on_core_failed(self, event):
+        """Show what went wrong and hand the window back.
+
+        on_start disables the start button, the params panel and the chapter checkboxes for
+        the duration of the run; if synthesis raises, nothing else re-enables them, so the
+        error has to undo that too or the only way out is to quit the app.
+        """
+        print(event.details)
+        self.synthesis_in_progress = False
+        self.re_enable_after_synthesis()
+        wx.MessageBox(f'Synthesis failed:\n\n{event.message}\n\n'
+                      'The full traceback is on the terminal.',
+                      'Audiblez', wx.OK | wx.ICON_ERROR, self)
+
+    def re_enable_after_synthesis(self):
+        """Undo the disabling on_start did. Safe to call before any book is open."""
+        if self.chapters_panel is None:
+            return
+        self.start_button.Enable()
+        self.start_button.Show()
+        self.params_panel.Enable()
+        self.table.EnableCheckBoxes(True)
 
     def create_layout(self):
         # Panels layout looks like this:
@@ -184,14 +257,17 @@ class MainWindow(wx.Frame):
         self.center_panel = wx.Panel(splitter_right)
         self.center_sizer = wx.BoxSizer(wx.VERTICAL)
         self.center_panel.SetSizer(self.center_sizer)
-        self.text_area = wx.TextCtrl(self.center_panel, style=wx.TE_MULTILINE, size=(int(self.window_width * 0.4), -1))
-        font = wx.Font(14, wx.MODERN, wx.NORMAL, wx.NORMAL)
+        self.text_area = wx.TextCtrl(self.center_panel, style=wx.TE_MULTILINE)
+        # A minimum, not a fixed size. The old hard-coded 40% of the window width was a
+        # floor the sizer had to honour, and it squeezed the parameters column to zero.
+        self.text_area.SetMinSize((self.scaled(280), self.scaled(160)))
+        font = wx.Font(min(max(self.scaled(13), 10), 16), wx.MODERN, wx.NORMAL, wx.NORMAL)
         self.text_area.SetFont(font)
         # On text change, update the extracted_text attribute of the selected_chapter:
         self.text_area.Bind(wx.EVT_TEXT, lambda event: setattr(self.selected_chapter, 'extracted_text', self.text_area.GetValue()))
 
-        self.chapter_label = wx.StaticText(
-            self.center_panel, label=f'Edit / Preview content for section "{self.selected_chapter.short_name}":')
+        self.chapter_label = wx.StaticText(self.center_panel)
+        self.set_chapter_label(self.selected_chapter)
         preview_button = wx.Button(self.center_panel, label="🔊 Preview")
         preview_button.Bind(wx.EVT_BUTTON, self.on_preview_chapter)
 
@@ -206,6 +282,12 @@ class MainWindow(wx.Frame):
         splitter_right_sizer.Add(self.center_panel, 1, wx.ALL | wx.EXPAND, 5)
         splitter_right_sizer.Add(self.right_panel, 1, wx.ALL | wx.EXPAND, 5)
 
+    def set_chapter_label(self, chapter):
+        """Long section names wrap: as a single line they widen the whole centre column."""
+        self.chapter_label.SetLabel(f'Edit / Preview content for section "{chapter.short_name}":')
+        self.chapter_label.Wrap(max(self.scaled(260), self.center_panel.GetSize().width - 4 * border))
+        self.center_panel.Layout()
+
     def about_dialog(self):
         msg = ("A simple tool to generate audiobooks from EPUB files using Kokoro-82M models\n" +
                "Distributed under the MIT License.\n\n" +
@@ -214,19 +296,21 @@ class MainWindow(wx.Frame):
         wx.MessageBox(msg, "Audiblez")
 
     def create_right_panel(self, splitter_right):
-        self.right_panel = wx.Panel(splitter_right)
+        self.right_panel = ScrolledPanel(splitter_right, style=wx.TAB_TRAVERSAL)
         self.right_sizer = wx.BoxSizer(wx.VERTICAL)
         self.right_panel.SetSizer(self.right_sizer)
 
         self.book_info_panel_box = wx.Panel(self.right_panel, style=wx.SUNKEN_BORDER)
         book_info_panel_box_sizer = wx.StaticBoxSizer(wx.VERTICAL, self.book_info_panel_box, "Book Details")
         self.book_info_panel_box.SetSizer(book_info_panel_box_sizer)
-        self.right_sizer.Add(self.book_info_panel_box, 1, wx.ALL | wx.EXPAND, 5)
+        # Proportion 0: a wx.BoxSizer sizes stretchable children alike, so three boxes at
+        # proportion 1 asked for three times the tallest one's height and overflowed.
+        self.right_sizer.Add(self.book_info_panel_box, 0, wx.ALL | wx.EXPAND, border)
 
         self.book_info_panel = wx.Panel(self.book_info_panel_box, style=wx.BORDER_NONE)
         self.book_info_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.book_info_panel.SetSizer(self.book_info_sizer)
-        book_info_panel_box_sizer.Add(self.book_info_panel, 1, wx.ALL | wx.EXPAND, 5)
+        book_info_panel_box_sizer.Add(self.book_info_panel, 1, wx.ALL | wx.EXPAND, border)
 
         # Add cover image
         self.cover_bitmap = wx.StaticBitmap(self.book_info_panel, -1)
@@ -240,34 +324,39 @@ class MainWindow(wx.Frame):
         self.create_book_details_panel()
         self.create_params_panel()
         self.create_synthesis_panel()
+        # The parameters are the tallest thing in the window: on a short screen, or in a
+        # window the user has shrunk, this column scrolls rather than losing the Start
+        # button off the bottom or the controls off the side.
+        self.right_panel.SetupScrolling(scroll_x=True, scroll_y=True, scrollToTop=False)
 
     def create_book_details_panel(self):
         book_details_panel = wx.Panel(self.book_info_panel)
-        book_details_sizer = wx.GridBagSizer(10, 10)
+        book_details_sizer = wx.GridBagSizer(self.scaled(8), self.scaled(8))
         book_details_panel.SetSizer(book_details_sizer)
-        self.book_info_sizer.Add(book_details_panel, 1, wx.ALL | wx.EXPAND, 5)
+        self.book_info_sizer.Add(book_details_panel, 1, wx.ALL | wx.EXPAND, border)
 
-        # Add title
-        title_label = wx.StaticText(book_details_panel, label="Title:")
-        title_text = wx.StaticText(book_details_panel, label=self.selected_book_title)
-        book_details_sizer.Add(title_label, pos=(0, 0), flag=wx.ALL, border=5)
-        book_details_sizer.Add(title_text, pos=(0, 1), flag=wx.ALL, border=5)
+        def add_row(row, label, value):
+            """A label and a value that ellipsizes.
 
-        # Add Author
-        author_label = wx.StaticText(book_details_panel, label="Author:")
-        author_text = wx.StaticText(book_details_panel, label=self.selected_book_author)
-        book_details_sizer.Add(author_label, pos=(1, 0), flag=wx.ALL, border=5)
-        book_details_sizer.Add(author_text, pos=(1, 1), flag=wx.ALL, border=5)
+            Laid out at its natural width a long title made this box the widest thing in the
+            window, which stretched the whole right column and squeezed the chapter list.
+            """
+            label_text = wx.StaticText(book_details_panel, label=label)
+            book_details_sizer.Add(label_text, pos=(row, 0), flag=wx.ALL, border=border)
+            value_text = wx.StaticText(book_details_panel, label=value, style=wx.ST_ELLIPSIZE_END)
+            value_text.SetMinSize((self.scaled(95), -1))
+            value_text.SetToolTip(value)
+            book_details_sizer.Add(value_text, pos=(row, 1), flag=wx.ALL | wx.EXPAND, border=border)
 
-        # Add Total length
-        length_label = wx.StaticText(book_details_panel, label="Total Length:")
         if not hasattr(self, 'document_chapters'):
             total_len = 0
         else:
             total_len = sum([len(c.extracted_text) for c in self.document_chapters])
-        length_text = wx.StaticText(book_details_panel, label=f'{total_len:,} characters')
-        book_details_sizer.Add(length_label, pos=(2, 0), flag=wx.ALL, border=5)
-        book_details_sizer.Add(length_text, pos=(2, 1), flag=wx.ALL, border=5)
+
+        add_row(0, "Title:", self.selected_book_title)
+        add_row(1, "Author:", self.selected_book_author)
+        add_row(2, "Total Length:", f'{total_len:,} characters')
+        book_details_sizer.AddGrowableCol(1)
 
     def create_params_panel(self):
         panel_box = wx.Panel(self.right_panel, style=wx.SUNKEN_BORDER)
@@ -275,36 +364,21 @@ class MainWindow(wx.Frame):
         panel_box.SetSizer(panel_box_sizer)
 
         panel = self.params_panel = wx.Panel(panel_box)
-        panel_box_sizer.Add(panel, 1, wx.ALL | wx.EXPAND, 5)
-        self.right_sizer.Add(panel_box, 1, wx.ALL | wx.EXPAND, 5)
-        sizer = wx.GridBagSizer(10, 10)
+        panel_box_sizer.Add(panel, 1, wx.ALL | wx.EXPAND, border)
+        self.right_sizer.Add(panel_box, 1, wx.ALL | wx.EXPAND, border)
+        sizer = wx.GridBagSizer(self.scaled(8), self.scaled(8))
         panel.SetSizer(sizer)
 
-        # Model: which weights run. Chosen first, because it decides what the Voice and
-        # Speed rows below may contain. Qwen is only offered when MLX can actually run it.
-        model_label = wx.StaticText(panel, label="Model:")
-        self.selected_model = DEFAULT_MODEL
-        model_choices = [DEFAULT_MODEL] + ([m for m in sorted(MODELS)
-                                            if m != DEFAULT_MODEL] if mlx_available() else [])
-        model_dropdown = wx.ComboBox(panel, choices=model_choices, value=DEFAULT_MODEL,
-                                     style=wx.CB_READONLY)
-        model_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_model)
-        sizer.Add(model_label, pos=(0, 0), flag=wx.ALL, border=border)
-        sizer.Add(model_dropdown, pos=(0, 1), flag=wx.ALL, border=border)
-
-        self.model_note = wx.StaticText(panel, label='')
-        self.model_note.SetForegroundColour(wx.Colour(110, 110, 110))
-        sizer.Add(self.model_note, pos=(1, 1), flag=wx.ALL, border=border)
-
-        # Backend: which TTS runtime runs. MLX is Apple Silicon only and much faster.
+        # Backend: which TTS engine runs. MLX is Apple Silicon only and much faster.
         backend_label = wx.StaticText(panel, label="Backend:")
         self.selected_backend = 'auto'
         backend_choices = ['auto'] + (['mlx'] if mlx_available() else []) + \
-                          (['torch'] if torch_available() else [])
+                          (['torch'] if torch_available() else []) + \
+                          (['edge'] if edge_available() else [])
         backend_dropdown = wx.ComboBox(panel, choices=backend_choices, value='auto', style=wx.CB_READONLY)
         backend_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_backend)
-        sizer.Add(backend_label, pos=(2, 0), flag=wx.ALL, border=border)
-        sizer.Add(backend_dropdown, pos=(2, 1), flag=wx.ALL, border=border)
+        sizer.Add(backend_label, pos=(0, 0), flag=wx.ALL, border=border)
+        sizer.Add(backend_dropdown, pos=(0, 1), flag=wx.ALL, border=border)
 
         resolved = resolve_backend('auto')
         if mlx_available():
@@ -315,7 +389,8 @@ class MainWindow(wx.Frame):
             backend_note = f'"auto" will use {resolved}'
         self.backend_note = wx.StaticText(panel, label=backend_note)
         self.backend_note.SetForegroundColour(wx.Colour(110, 110, 110))
-        sizer.Add(self.backend_note, pos=(3, 1), flag=wx.ALL, border=border)
+        self.backend_note.Wrap(self.scaled(200))
+        sizer.Add(self.backend_note, pos=(1, 1), flag=wx.ALL, border=border)
 
         # Device only affects the torch backend; MLX always runs on the Apple GPU.
         self.device_label = wx.StaticText(panel, label="Torch device:")
@@ -331,40 +406,44 @@ class MainWindow(wx.Frame):
                 cuda_radio.SetValue(True)
             cpu_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cpu'))
             cuda_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cuda'))
-        sizer.Add(self.device_label, pos=(4, 0), flag=wx.ALL, border=border)
-        sizer.Add(engine_radio_panel, pos=(4, 1), flag=wx.ALL, border=border)
+        sizer.Add(self.device_label, pos=(2, 0), flag=wx.ALL, border=border)
+        sizer.Add(engine_radio_panel, pos=(2, 1), flag=wx.ALL, border=border)
         engine_radio_panel_sizer = wx.BoxSizer(wx.HORIZONTAL)
         engine_radio_panel.SetSizer(engine_radio_panel_sizer)
         engine_radio_panel_sizer.Add(cpu_radio, 0, wx.ALL, 5)
         engine_radio_panel_sizer.Add(cuda_radio, 0, wx.ALL, 5)
         self.update_device_row()
 
+        # Languages: multi-select, so the voice dropdown only shows the languages you care
+        # about. The list depends on the backend (Kokoro codes vs Edge locales).
+        language_label = wx.StaticText(panel, label="Languages:")
+        self.language_listbox = wx.CheckListBox(panel, size=(self.scaled(180), self.scaled(110)))
+        self.language_listbox.Bind(wx.EVT_CHECKLISTBOX, self.on_select_languages)
+        sizer.Add(language_label, pos=(3, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.language_listbox, pos=(3, 1), flag=wx.ALL | wx.EXPAND, border=border)
+
         voice_label = wx.StaticText(panel, label="Voice:")
-        # Contents follow the selected model -- see update_voice_choices().
+        self.selected_voice = ''
+        # Editable: a voice can also be a blend ("af_heart,af_bella"), a path to a .pt
+        # pack, or an Edge voice name typed in full.
         self.voice_dropdown = wx.ComboBox(panel, choices=[], value='')
         self.voice_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_voice)
         self.voice_dropdown.Bind(wx.EVT_TEXT, self.on_select_voice)
-        sizer.Add(voice_label, pos=(5, 0), flag=wx.ALL, border=border)
-        sizer.Add(self.voice_dropdown, pos=(5, 1), flag=wx.ALL | wx.EXPAND, border=border)
+        sizer.Add(voice_label, pos=(4, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.voice_dropdown, pos=(4, 1), flag=wx.ALL | wx.EXPAND, border=border)
 
-        self.voice_note = wx.StaticText(panel, label='')
-        self.voice_note.SetForegroundColour(wx.Colour(110, 110, 110))
-        sizer.Add(self.voice_note, pos=(6, 1), flag=wx.ALL, border=border)
+        voice_note = wx.StaticText(panel, label='Blend voices with commas, or type a path to a .pt voice')
+        voice_note.SetForegroundColour(wx.Colour(110, 110, 110))
+        voice_note.Wrap(self.scaled(200))
+        sizer.Add(voice_note, pos=(5, 1), flag=wx.ALL, border=border)
 
         # Add dropdown for speed
-        self.speed_label = wx.StaticText(panel, label="Speed:")
-        self.speed_text_input = wx.TextCtrl(panel, value="1.0")
+        speed_label = wx.StaticText(panel, label="Speed:")
+        speed_text_input = wx.TextCtrl(panel, value="1.0")
         self.selected_speed = '1.0'
-        self.speed_text_input.Bind(wx.EVT_TEXT, self.on_select_speed)
-        sizer.Add(self.speed_label, pos=(7, 0), flag=wx.ALL, border=border)
-        sizer.Add(self.speed_text_input, pos=(7, 1), flag=wx.ALL, border=border)
-
-        self.speed_note = wx.StaticText(panel, label='')
-        self.speed_note.SetForegroundColour(wx.Colour(110, 110, 110))
-        sizer.Add(self.speed_note, pos=(8, 1), flag=wx.ALL, border=border)
-
-        # Populate everything the model governs, now that all those widgets exist.
-        self.update_model_dependent_rows()
+        speed_text_input.Bind(wx.EVT_TEXT, self.on_select_speed)
+        sizer.Add(speed_label, pos=(6, 0), flag=wx.ALL, border=border)
+        sizer.Add(speed_text_input, pos=(6, 1), flag=wx.ALL, border=border)
 
         # Add file dialog selector to select output folder
         output_folder_label = wx.StaticText(panel, label="Output Folder:")
@@ -372,12 +451,21 @@ class MainWindow(wx.Frame):
         os.makedirs(default_output, exist_ok=True)
         self.output_folder_text_ctrl = wx.TextCtrl(panel, value=default_output)
         self.output_folder_text_ctrl.SetEditable(False)
-        # self.output_folder_text_ctrl.SetMinSize((200, -1))
+        # Without a minimum the control asks to be as wide as the whole path, which is what
+        # used to push the parameters column past the edge of the screen.
+        self.output_folder_text_ctrl.SetMinSize((self.scaled(150), -1))
+        self.output_folder_text_ctrl.SetToolTip(default_output)
         output_folder_button = wx.Button(panel, label="📂 Select")
         output_folder_button.Bind(wx.EVT_BUTTON, self.open_output_folder_dialog)
-        sizer.Add(output_folder_label, pos=(9, 0), flag=wx.ALL, border=border)
-        sizer.Add(self.output_folder_text_ctrl, pos=(9, 1), flag=wx.ALL | wx.EXPAND, border=border)
-        sizer.Add(output_folder_button, pos=(10, 1), flag=wx.ALL, border=border)
+        sizer.Add(output_folder_label, pos=(7, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.output_folder_text_ctrl, pos=(7, 1), flag=wx.ALL | wx.EXPAND, border=border)
+        sizer.Add(output_folder_button, pos=(8, 1), flag=wx.ALL, border=border)
+
+        # Only valid once the cells exist: the controls take any spare width, the labels
+        # keep theirs.
+        sizer.AddGrowableCol(1)
+
+        self.rebuild_languages()
 
     def create_synthesis_panel(self):
         # Think and identify layout issue with the folling code
@@ -386,8 +474,8 @@ class MainWindow(wx.Frame):
         panel_box.SetSizer(panel_box_sizer)
 
         panel = self.synth_panel = wx.Panel(panel_box)
-        panel_box_sizer.Add(panel, 1, wx.ALL | wx.EXPAND, 5)
-        self.right_sizer.Add(panel_box, 1, wx.ALL | wx.EXPAND, 5)
+        panel_box_sizer.Add(panel, 1, wx.ALL | wx.EXPAND, border)
+        self.right_sizer.Add(panel_box, 0, wx.ALL | wx.EXPAND, border)
         sizer = wx.BoxSizer(wx.VERTICAL)
         panel.SetSizer(sizer)
 
@@ -406,7 +494,7 @@ class MainWindow(wx.Frame):
         self.progress_bar_label = wx.StaticText(panel, label="Synthesis Progress:")
         sizer.Add(self.progress_bar_label, 0, wx.ALL, 5)
         self.progress_bar = wx.Gauge(panel, range=100, style=wx.GA_PROGRESS)
-        self.progress_bar.SetMinSize((-1, 30))
+        self.progress_bar.SetMinSize((-1, self.scaled(26)))
         sizer.Add(self.progress_bar, 0, wx.ALL | wx.EXPAND, 5)
         self.progress_bar_label.Hide()
         self.progress_bar.Hide()
@@ -423,6 +511,7 @@ class MainWindow(wx.Frame):
             output_folder = dialog.GetPath()
             print(f"Selected output folder: {output_folder}")
             self.output_folder_text_ctrl.SetValue(output_folder)
+            self.output_folder_text_ctrl.SetToolTip(output_folder)
 
     def on_select_voice(self, event):
         self.selected_voice = event.GetString()
@@ -430,11 +519,7 @@ class MainWindow(wx.Frame):
     def on_select_backend(self, event):
         self.selected_backend = event.GetString()
         self.update_device_row()
-
-    def on_select_model(self, event):
-        self.selected_model = event.GetString()
-        self.update_model_dependent_rows()
-        self.update_device_row()
+        self.rebuild_languages()
 
     def update_device_row(self):
         """The torch device radio is meaningless when MLX will actually run."""
@@ -442,46 +527,64 @@ class MainWindow(wx.Frame):
         self.device_label.Enable(uses_torch)
         self.device_panel.Enable(uses_torch)
 
-    def update_model_dependent_rows(self):
-        """Repoint the Model note, Voice list and Speed field at the selected model."""
-        self.model_note.SetLabel(MODEL_NOTES.get(self.selected_model, ''))
-        self.update_voice_choices()
-        self.update_speed_row()
+    def languages_for_backend(self, backend):
+        """The language codes offered for a backend: Kokoro codes or Edge locales."""
+        if resolve_backend(backend) == 'edge':
+            return list(edge_voices.keys())
+        return list(voices.keys())
 
-    def update_voice_choices(self):
-        """Rebuild the voice dropdown for the selected model.
+    def language_label(self, backend, code):
+        if resolve_backend(backend) == 'edge':
+            return f'{edge_flags[code]} {code}'
+        return f'{flags[code]} {code}'
 
-        Resetting the selection is the point, not a side effect: leaving a Kokoro voice
-        selected after switching to Qwen would send an unknown speaker to the model, which
-        rejects it outright -- and that failure would surface at synthesis time, long after
-        the mistake was made.
-        """
-        model = self.selected_model
-        labelled = [f'{flags[lang]} {voice}'
-                    for lang, names in voices_for(model).items() for voice in names]
-        self.voice_dropdown.SetItems(labelled)
-        self.selected_voice = labelled[0]
-        self.voice_dropdown.SetValue(labelled[0])
-        if model == DEFAULT_MODEL:
-            # Editable: a voice can also be a blend ("af_heart,af_bella") or a .pt path.
-            self.voice_dropdown.SetWindowStyleFlag(wx.CB_DROPDOWN)
-            self.voice_note.SetLabel('Blend voices with commas, or type a path to a .pt voice')
+    def rebuild_languages(self):
+        """Repopulate the language listbox for the current backend, ticking the defaults."""
+        codes = self.languages_for_backend(self.selected_backend)
+        self.language_codes = codes
+        self.language_listbox.SetItems([self.language_label(self.selected_backend, c) for c in codes])
+        selected = default_languages(codes)
+        for i, code in enumerate(codes):
+            self.language_listbox.Check(i, code in selected)
+        self.selected_languages = selected
+        self.rebuild_voice_dropdown()
+
+    def on_select_languages(self, event):
+        self.selected_languages = {self.language_codes[i] for i in range(len(self.language_codes))
+                                   if self.language_listbox.IsChecked(i)}
+        self.rebuild_voice_dropdown()
+
+    def rebuild_voice_dropdown(self):
+        """Rebuild the voice dropdown from the checked languages of the current backend."""
+        resolved = resolve_backend(self.selected_backend)
+        choices = []
+        if resolved == 'edge':
+            for locale in self.language_codes:
+                if locale not in self.selected_languages:
+                    continue
+                for v in edge_voices[locale]:
+                    choices.append(f'{edge_flags[locale]} {v}')
         else:
-            # Qwen accepts only its own speaker names, so free text can only be an error.
-            self.voice_dropdown.SetWindowStyleFlag(wx.CB_READONLY)
-            self.voice_note.SetLabel('Fixed speakers — no blending and no .pt voice packs')
-
-    def update_speed_row(self):
-        """Disable Speed for models that silently discard it."""
-        supported = MODELS[self.selected_model]['supports_speed']
-        self.speed_label.Enable(supported)
-        self.speed_text_input.Enable(supported)
-        if supported:
-            self.speed_note.SetLabel('')
-        else:
-            # The model accepts speed and ignores it; saying nothing would hand back a
-            # full-length audiobook at the wrong pace with no sign anything went wrong.
-            self.speed_note.SetLabel(f'{self.selected_model} ignores speed — audio plays at 1.0')
+            for code in self.language_codes:
+                if code not in self.selected_languages:
+                    continue
+                for v in voices[code]:
+                    choices.append(f'{flags[code]} {v}')
+        current = self.get_selected_voice()
+        self.voice_dropdown.SetItems(choices)
+        # Keep the current voice if it is still offered.
+        display = next((c for c in choices if c.split(' ', 1)[1] == current), '')
+        if not display:
+            # The dropdown is editable on purpose, and a typed voice -- a .pt path, a
+            # blend, or an Edge voice outside the curated locales -- is in no list, so
+            # ticking one more language must not silently swap it for choices[0] and send
+            # a multi-hour run off with the wrong voice. Only a listed voice whose
+            # language was just unticked falls back.
+            display = current if not is_catalog_voice(current) else ''
+            if not display:
+                display = choices[0] if choices else ''
+        self.selected_voice = display
+        self.voice_dropdown.SetValue(display)
 
     def on_select_speed(self, event):
         speed = float(event.GetString())
@@ -523,11 +626,15 @@ class MainWindow(wx.Frame):
             pil_image = Image.open(io.BytesIO(cover.content))
             wx_img = wx.EmptyImage(pil_image.size[0], pil_image.size[1])
             wx_img.SetData(pil_image.convert("RGB").tobytes())
-            cover_h = 200
+            cover_h = self.scaled(170)
             cover_w = int(cover_h * pil_image.size[0] / pil_image.size[1])
+            max_w = self.scaled(105)
+            if cover_w > max_w:  # a landscape cover, which the old fixed max width squashed
+                cover_h = int(cover_h * max_w / cover_w)
+                cover_w = max_w
             wx_img.Rescale(cover_w, cover_h)
             self.cover_bitmap.SetBitmap(wx_img.ConvertToBitmap())
-            self.cover_bitmap.SetMaxSize((200, cover_h))
+            self.cover_bitmap.SetMaxSize((cover_w, cover_h))
 
         chapters_panel = self.create_chapters_table_panel(good_chapters)
 
@@ -544,6 +651,8 @@ class MainWindow(wx.Frame):
         self.splitter_left.Layout()
         self.splitter_right.Layout()
         self.splitter.Layout()
+        self.fit_to_work_area()
+        self.resize_table_columns()
 
     def on_table_checked(self, event):
         self.document_chapters[event.GetIndex()].is_selected = True
@@ -556,7 +665,7 @@ class MainWindow(wx.Frame):
         print('Selected', event.GetIndex(), chapter.short_name)
         self.selected_chapter = chapter
         self.text_area.SetValue(chapter.extracted_text)
-        self.chapter_label.SetLabel(f'Edit / Preview content for section "{chapter.short_name}":')
+        self.set_chapter_label(chapter)
 
     def create_chapters_table_panel(self, good_chapters):
         panel = ScrolledPanel(self.splitter_left, -1, style=wx.TAB_TRAVERSAL | wx.SUNKEN_BORDER)
@@ -568,11 +677,8 @@ class MainWindow(wx.Frame):
         table.InsertColumn(1, "Chapter Name")
         table.InsertColumn(2, "Chapter Length")
         table.InsertColumn(3, "Status")
-        table.SetColumnWidth(0, 80)
-        table.SetColumnWidth(1, 150)
-        table.SetColumnWidth(2, 150)
-        table.SetColumnWidth(3, 100)
-        table.SetSize((250, -1))
+        table.SetMinSize((self.scaled(240), self.scaled(160)))
+        table.Bind(wx.EVT_SIZE, self.on_table_resized)
         table.EnableCheckBoxes()
         table.Bind(wx.EVT_LIST_ITEM_CHECKED, self.on_table_checked)
         table.Bind(wx.EVT_LIST_ITEM_UNCHECKED, self.on_table_unchecked)
@@ -588,11 +694,28 @@ class MainWindow(wx.Frame):
         sizer.Add(table, 1, wx.ALL | wx.EXPAND, 5)
         return panel
 
+    def on_table_resized(self, event):
+        # Resize the table that sent the event, not self.table: opening a second book tears
+        # the old one down while self.table already points at its replacement.
+        self.resize_table_columns(event.GetEventObject())
+        event.Skip()
+
+    def resize_table_columns(self, table=None):
+        """Share out the width the table has, instead of overflowing a narrow column."""
+        table = table if table is not None else self.table
+        width = table.GetClientSize().width
+        if width <= 0:
+            return
+        included_w, length_w, status_w = self.scaled(70), self.scaled(80), self.scaled(90)
+        name_w = max(self.scaled(90), width - included_w - length_w - status_w - border)
+        for column, column_width in enumerate((included_w, name_w, length_w, status_w)):
+            table.SetColumnWidth(column, column_width)
+
     def get_selected_voice(self):
         """Strip the flag emoji the dropdown prepends, tolerating typed-in custom voices."""
         voice = self.selected_voice.strip()
         first, _, rest = voice.partition(' ')
-        if rest and first in flags.values():
+        if rest and (first in flags.values() or first in edge_flags.values()):
             return rest.strip()
         return voice
 
@@ -600,36 +723,46 @@ class MainWindow(wx.Frame):
         return float(self.selected_speed)
 
     def on_preview_chapter(self, event):
-        # Qwen speaker names carry no language ('ryan' -> 'r' is meaningless), so this has
-        # to go through the model-aware default rather than slicing the voice name.
-        lang_code = default_lang_code(self.get_selected_voice(), self.selected_model)
+        lang_code = lang_code_for(self.get_selected_voice())
         button = event.GetEventObject()
         button.SetLabel("⏳")
         button.Disable()
 
+        def restore_button():
+            button.SetLabel("🔊 Preview")
+            button.Enable()
+
         def generate_preview():
             import audiblez.core as core
             from audiblez.backends import get_pipeline
-            # Same engine as the real run, or previews stop being representative.
-            core.set_espeak_library()
-            # Same engine *and* model as the real run, or previews stop being representative.
-            pipeline = get_pipeline(self.get_selected_voice(), lang_code=lang_code,
-                                    backend=self.selected_backend, model=self.selected_model)
-            core.load_spacy()
-            text = self.selected_chapter.extracted_text[:300]
-            if len(text) == 0: return
-            audio_segments = core.gen_audio_segments(
-                pipeline,
-                text,
-                voice=self.get_selected_voice(),
-                speed=self.get_selected_speed())
-            final_audio = np.concatenate(audio_segments)
-            tmp_preview_wav_file = NamedTemporaryFile(suffix='.wav', delete=False)
-            soundfile.write(tmp_preview_wav_file, final_audio, core.sample_rate)
-            cmd = ['ffplay', '-autoexit', '-nodisp', tmp_preview_wav_file.name]
-            subprocess.run(cmd)
-            button.SetLabel("🔊 Preview")
-            button.Enable()
+            try:
+                # Same engine as the real run, or previews stop being representative.
+                core.set_espeak_library()
+                pipeline = get_pipeline(self.get_selected_voice(), lang_code=lang_code,
+                                        backend=self.selected_backend)
+                core.load_spacy()
+                text = self.selected_chapter.extracted_text[:300]
+                if len(text) == 0: return
+                audio_segments = core.gen_audio_segments(
+                    pipeline,
+                    text,
+                    voice=self.get_selected_voice(),
+                    speed=self.get_selected_speed(),
+                    lang_code=lang_code)
+                final_audio = np.concatenate(audio_segments)
+                tmp_preview_wav_file = NamedTemporaryFile(suffix='.wav', delete=False)
+                soundfile.write(tmp_preview_wav_file, final_audio, core.sample_rate)
+                cmd = ['ffplay', '-autoexit', '-nodisp', tmp_preview_wav_file.name]
+                subprocess.run(cmd)
+            except Exception as e:
+                traceback.print_exc()
+                wx.CallAfter(wx.MessageBox, f'Preview failed:\n\n{type(e).__name__}: {e}',
+                             'Audiblez', wx.OK | wx.ICON_ERROR)
+            finally:
+                # wx widgets are only safe to touch from the main thread, and the button has
+                # to come back even when the preview raised -- otherwise it stays on "⏳"
+                # disabled, and previewing is dead for the rest of the session.
+                wx.CallAfter(restore_button)
 
         if len(self.preview_threads) > 0:
             for thread in self.preview_threads:
@@ -656,14 +789,12 @@ class MainWindow(wx.Frame):
 
         # self.stop_button.Show()
         backend = self.selected_backend
-        model = self.selected_model
         print('Starting Audiobook Synthesis',
-              dict(file_path=file_path, voice=voice, pick_manually=False, speed=speed,
-                   backend=backend, model=model))
+              dict(file_path=file_path, voice=voice, pick_manually=False, speed=speed, backend=backend))
         self.core_thread = CoreThread(params=dict(
             file_path=file_path, voice=voice, pick_manually=False, speed=speed,
             output_folder=self.output_folder_text_ctrl.GetValue(),
-            selected_chapters=selected_chapters, backend=backend, model=model))
+            selected_chapters=selected_chapters, backend=backend))
         self.core_thread.start()
 
     def on_open(self, event):
@@ -705,7 +836,13 @@ class CoreThread(threading.Thread):
 
     def run(self):
         import audiblez.core as core
-        core.main(**self.params, post_event=self.post_event)
+        try:
+            core.main(**self.params, post_event=self.post_event)
+        except Exception as e:
+            # A thread that dies takes its traceback to a terminal the GUI user never sees,
+            # and leaves the window disabled mid-run. Hand the error back to the main thread.
+            self.post_event('CORE_FAILED', message=f'{type(e).__name__}: {e}',
+                            details=traceback.format_exc())
 
     def post_event(self, event_name, **kwargs):
         # eg. 'EVENT_CORE_PROGRESS' -> EventCoreProgress, EVENT_CORE_PROGRESS
