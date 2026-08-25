@@ -1,4 +1,6 @@
 import sys
+import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -406,6 +408,97 @@ class EdgeRetryTest(unittest.TestCase):
         self.assertIn('你好。', str(ctx.exception))
 
 
+class AdaptiveConcurrencyGateTest(unittest.TestCase):
+    """_AdaptiveConcurrencyGate: starts serial, ramps up only on clean streaks, drops to 1
+    on any retry, and never lets more than `limit` callers through at once."""
+
+    def test_starts_fully_serial(self):
+        gate = backends._AdaptiveConcurrencyGate(ceiling=3, ramp_streak=2)
+        self.assertEqual(gate._limit, 1)
+
+    def test_ramps_up_after_a_streak_of_clean_successes(self):
+        gate = backends._AdaptiveConcurrencyGate(ceiling=3, ramp_streak=2)
+        for _ in range(2):
+            gate.acquire()
+            gate.release(needed_retry=False)
+        self.assertEqual(gate._limit, 2)
+
+    def test_never_exceeds_the_ceiling(self):
+        gate = backends._AdaptiveConcurrencyGate(ceiling=2, ramp_streak=1)
+        for _ in range(10):
+            gate.acquire()
+            gate.release(needed_retry=False)
+        self.assertEqual(gate._limit, 2)
+
+    def test_a_retry_drops_the_limit_back_to_one(self):
+        gate = backends._AdaptiveConcurrencyGate(ceiling=3, ramp_streak=1)
+        gate.acquire()
+        gate.release(needed_retry=False)
+        self.assertEqual(gate._limit, 2, 'sanity check: one clean call should have ramped it up')
+        gate.acquire()
+        gate.release(needed_retry=True)
+        self.assertEqual(gate._limit, 1)
+
+    def test_a_transport_failure_also_drops_the_limit(self):
+        # release() is called from a `finally`, so a call that raised outright must still
+        # report itself as needing a retry -- it is at least as strong a throttling signal
+        # as one that succeeded on a later attempt.
+        gate = backends._AdaptiveConcurrencyGate(ceiling=3, ramp_streak=1)
+        gate.acquire()
+        gate.release(needed_retry=False)
+        self.assertEqual(gate._limit, 2)
+        gate.acquire()
+        try:
+            raise RuntimeError('simulated transport failure')
+        except RuntimeError:
+            pass
+        finally:
+            gate.release(needed_retry=True)
+        self.assertEqual(gate._limit, 1)
+
+    def test_extra_callers_block_until_a_slot_frees(self):
+        gate = backends._AdaptiveConcurrencyGate(ceiling=1, ramp_streak=1)
+        gate.acquire()
+        acquired = threading.Event()
+
+        def waiter():
+            gate.acquire()
+            acquired.set()
+
+        t = threading.Thread(target=waiter)
+        t.start()
+        try:
+            self.assertFalse(acquired.wait(timeout=0.1),
+                             'a second caller must not proceed while the gate is full')
+            gate.release(needed_retry=False)
+            self.assertTrue(acquired.wait(timeout=1),
+                            'the waiting caller must proceed once a slot frees')
+        finally:
+            t.join(timeout=1)
+
+
+class EdgePipelineConcurrencyGateTest(unittest.TestCase):
+    """EdgePipeline wires a real call's outcome into its own gate."""
+
+    def call(self, script, text='你好。'):
+        fake = ScriptedEdgeTTS(script)
+        pipeline = backends.EdgePipeline('zh-CN')
+        with mock.patch.dict(sys.modules, fake_edge_tts_module(fake)), \
+             mock.patch.object(backends, 'time'):  # no real backoff in tests
+            list(pipeline(text, voice='zh-CN-XiaoxiaoNeural', speed=1.0))
+        return pipeline
+
+    def test_a_clean_first_attempt_counts_toward_the_ramp(self):
+        pipeline = self.call([make_mp3()])
+        self.assertEqual(pipeline._gate._streak, 1)
+        self.assertEqual(pipeline._gate._limit, 1, 'one success is below the default ramp streak')
+
+    def test_a_call_that_needed_a_retry_keeps_the_gate_at_one(self):
+        pipeline = self.call([b'', make_mp3()])
+        self.assertEqual(pipeline._gate._limit, 1)
+        self.assertEqual(pipeline._gate._streak, 0)
+
+
 class EdgeAvailableTest(unittest.TestCase):
     def test_true_when_edge_tts_installed(self):
         with mock.patch.dict(sys.modules, {'edge_tts': types.ModuleType('edge_tts')}):
@@ -700,8 +793,8 @@ class GenAudioSegmentsEdgeBatchingTest(unittest.TestCase):
     """gen_audio_segments batches consecutive sentences into one Edge call, and only Edge."""
 
     class RecordingEdgePipeline(backends.EdgePipeline):
-        """A real EdgePipeline subclass (so isinstance checks pass) that never touches the
-        network: it just records the text of each call."""
+        """A real EdgePipeline subclass (so it inherits batch_chars and max_concurrency)
+        that never touches the network: it just records the text of each call."""
 
         def __init__(self):
             self.calls = []
@@ -747,6 +840,86 @@ class GenAudioSegmentsEdgeBatchingTest(unittest.TestCase):
 
         gen_audio_segments(fake_pipeline, self.FIVE_SENTENCES, voice='af_heart', speed=1.0)
         self.assertEqual(len(calls), 5, calls)
+
+
+class SlowConcurrentPipeline:
+    """Fake pipeline that takes real wall-clock time per call and tracks how many calls
+    were ever in flight together, to prove gen_audio_segments actually overlaps calls for
+    a pipeline that opts in -- rather than just trusting that a thread pool was created."""
+
+    batch_chars = None
+
+    def __init__(self, max_concurrency, delay=0.05):
+        self.max_concurrency = max_concurrency
+        self.delay = delay
+        self._lock = threading.Lock()
+        self._active = 0
+        self.max_active_seen = 0
+
+    def __call__(self, text, voice, speed=1.0, split_pattern=None):
+        with self._lock:
+            self._active += 1
+            self.max_active_seen = max(self.max_active_seen, self._active)
+        time.sleep(self.delay)
+        with self._lock:
+            self._active -= 1
+        yield None, None, np.zeros(4, dtype='float32')
+
+
+class GenAudioSegmentsConcurrencyDispatchTest(unittest.TestCase):
+    """gen_audio_segments dispatches to a thread pool sized from `max_concurrency`, for any
+    pipeline that opts in -- not just EdgePipeline -- and stays single-threaded otherwise."""
+
+    SIX_SENTENCES = ' '.join(f'This is sentence number {i}.' for i in range(6))
+
+    def test_overlaps_calls_for_a_pipeline_that_opts_in(self):
+        from audiblez.core import gen_audio_segments
+        pipeline = SlowConcurrentPipeline(max_concurrency=3)
+        gen_audio_segments(pipeline, self.SIX_SENTENCES, voice='en-US-BrianNeural', speed=1.0)
+        self.assertGreater(pipeline.max_active_seen, 1,
+                           'more than one call should have been in flight at once')
+        self.assertLessEqual(pipeline.max_active_seen, 3, 'must not exceed max_concurrency')
+
+    def test_stays_serial_when_max_concurrency_is_one(self):
+        from audiblez.core import gen_audio_segments
+        pipeline = SlowConcurrentPipeline(max_concurrency=1)
+        gen_audio_segments(pipeline, self.SIX_SENTENCES, voice='en-US-BrianNeural', speed=1.0)
+        self.assertEqual(pipeline.max_active_seen, 1)
+
+    def test_stays_serial_for_a_pipeline_that_never_opts_in(self):
+        from audiblez.core import gen_audio_segments
+        calls = []
+
+        def fake_pipeline(sent_text, voice, speed=1.0, split_pattern=None):
+            calls.append(sent_text)
+            yield None, None, np.zeros(4, dtype='float32')
+
+        # No max_concurrency attribute at all -- gen_audio_segments must default to 1.
+        gen_audio_segments(fake_pipeline, self.SIX_SENTENCES, voice='af_heart', speed=1.0)
+        self.assertEqual(len(calls), 6)
+
+    def test_audio_stays_in_chunk_order_despite_overlap(self):
+        # The underlying calls run concurrently and can finish in any order (nothing
+        # guarantees the 2nd chunk's network round trip returns before the 5th's) -- what
+        # gen_audio_segments must still guarantee is that its *returned* audio comes back
+        # in chunk order, since that is what gets concatenated into the chapter's .wav.
+        from audiblez.core import gen_audio_segments
+
+        class IndexTaggedPipeline(SlowConcurrentPipeline):
+            """Each chunk's 'audio' is its own sentence index, so the order of
+            gen_audio_segments's return value can be checked directly."""
+
+            def __call__(self, text, voice, speed=1.0, split_pattern=None):
+                for _ in super().__call__(text, voice, speed, split_pattern):
+                    index = int(text.split('number ')[1].split('.')[0])
+                    yield None, None, np.array([index], dtype='float32')
+
+        pipeline = IndexTaggedPipeline(max_concurrency=3, delay=0.02)
+        audio_segments = gen_audio_segments(pipeline, self.SIX_SENTENCES,
+                                            voice='en-US-BrianNeural', speed=1.0)
+        indices = [int(audio[0]) for audio in audio_segments]
+        self.assertEqual(indices, list(range(6)),
+                         'audio must come back in chunk order despite overlapping calls')
 
 
 class SentencizerAutoDownloadTest(unittest.TestCase):

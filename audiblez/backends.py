@@ -11,6 +11,7 @@ and everything downstream of it -- does not need to know which engine is running
 import os
 import platform
 import re
+import threading
 import time
 from glob import glob
 from pathlib import Path
@@ -225,6 +226,47 @@ def _is_no_audio(exc):
     return isinstance(exc, NoAudioReceived)
 
 
+class _AdaptiveConcurrencyGate:
+    """Bounds how many EdgePipeline calls actually hit the network at once, adaptively.
+
+    Edge throttles -- returns empty audio -- when requests are issued back to back (see
+    EDGE_ATTEMPTS/EDGE_RETRY_WAITS above), so this is not a fixed-size pool: it starts at
+    1 (fully serial), and only a run of `ramp_streak` clean, first-attempt successes earns
+    it one more slot, up to `ceiling`. Any call that needed a retry -- whether from a
+    transport error or a throttled empty response, the two are not distinguished here --
+    drops it straight back to 1. gen_audio_segments can submit more calls than the current
+    limit to a thread pool; the extras simply block in acquire() until a slot opens, so the
+    gate is the single source of truth for how much concurrency is actually happening.
+    """
+
+    def __init__(self, ceiling, ramp_streak=5):
+        self._ceiling = ceiling
+        self._ramp_streak = ramp_streak
+        self._limit = 1
+        self._in_flight = 0
+        self._streak = 0
+        self._cond = threading.Condition()
+
+    def acquire(self):
+        with self._cond:
+            while self._in_flight >= self._limit:
+                self._cond.wait()
+            self._in_flight += 1
+
+    def release(self, needed_retry):
+        with self._cond:
+            self._in_flight -= 1
+            if needed_retry:
+                self._limit = 1
+                self._streak = 0
+            else:
+                self._streak += 1
+                if self._streak >= self._ramp_streak and self._limit < self._ceiling:
+                    self._limit += 1
+                    self._streak = 0
+            self._cond.notify_all()
+
+
 class EdgePipeline:
     """Microsoft Edge's online TTS, wearing the pipeline callable signature.
 
@@ -232,10 +274,10 @@ class EdgePipeline:
     phonemes are None. Audio is decoded from the MP3 edge-tts returns (24kHz, the same
     rate audiblez writes) to numpy so np.concatenate downstream is unaffected.
 
-    Each __call__ is one network request, run with asyncio.run() -- audiblez's core is
-    synchronous and runs in a plain thread, so there is no running event loop to clash
-    with. split_pattern is accepted and ignored: edge-tts needs no sentence-level split
-    pattern.
+    Each __call__ is one network request, run with asyncio.run() in whichever thread calls
+    it -- audiblez's core is synchronous, so there is no running event loop in any given
+    thread for asyncio.run() to clash with, and a fresh event loop per thread is fine.
+    split_pattern is accepted and ignored: edge-tts needs no sentence-level split pattern.
     """
 
     # gen_audio_segments groups consecutive sentences into chunks up to this many
@@ -244,8 +286,14 @@ class EdgePipeline:
     # that wants the same amortization can opt in the same way.
     batch_chars = 1500
 
+    # gen_audio_segments may dispatch up to this many chunks to a thread pool at once; the
+    # instance's own _AdaptiveConcurrencyGate decides how many of them are actually allowed
+    # to call the network concurrently at any given moment (starting at 1, see above).
+    max_concurrency = 3
+
     def __init__(self, lang_code):
         self.lang_code = lang_code
+        self._gate = _AdaptiveConcurrencyGate(self.max_concurrency)
 
     def __call__(self, text, voice, speed=1.0, split_pattern=None):
         import asyncio
@@ -269,28 +317,39 @@ class EdgePipeline:
 
         excerpt = text.strip()[:40]
         mp3 = b''
-        for attempt in range(1, EDGE_ATTEMPTS + 1):
-            try:
-                mp3 = asyncio.run(synth())
-            except Exception as e:
-                if not _is_no_audio(e):
-                    # Could not reach the service at all: that breaks the run, not just this
-                    # fragment. A chapter's .wav is only written once the chapter finishes,
-                    # and finished chapters are skipped on the next run, so raising costs
-                    # this chapter and not the book.
-                    if attempt == EDGE_ATTEMPTS:
-                        raise RuntimeError(
-                            f'Edge TTS failed after {EDGE_ATTEMPTS} attempts on {excerpt!r}: '
-                            f'{type(e).__name__}: {e}') from e
-                    print(f'Edge TTS attempt {attempt} failed ({type(e).__name__}); retrying...')
+        needed_retry = False
+        self._gate.acquire()
+        try:
+            for attempt in range(1, EDGE_ATTEMPTS + 1):
+                if attempt > 1:
+                    needed_retry = True
+                try:
+                    mp3 = asyncio.run(synth())
+                except Exception as e:
+                    if not _is_no_audio(e):
+                        # Could not reach the service at all: that breaks the run, not just
+                        # this fragment. A chapter's .wav is only written once the chapter
+                        # finishes, and finished chapters are skipped on the next run, so
+                        # raising costs this chapter and not the book.
+                        if attempt == EDGE_ATTEMPTS:
+                            raise RuntimeError(
+                                f'Edge TTS failed after {EDGE_ATTEMPTS} attempts on {excerpt!r}: '
+                                f'{type(e).__name__}: {e}') from e
+                        print(f'Edge TTS attempt {attempt} failed ({type(e).__name__}); retrying...')
+                        time.sleep(_retry_wait(attempt))
+                        continue
+                    mp3 = b''   # answered, but with no speech: identical to an empty payload
+                if mp3:
+                    break
+                if attempt < EDGE_ATTEMPTS:
+                    print(f'Edge TTS returned no audio (attempt {attempt}); retrying...')
                     time.sleep(_retry_wait(attempt))
-                    continue
-                mp3 = b''   # answered, but with no speech: identical to an empty payload
-            if mp3:
-                break
-            if attempt < EDGE_ATTEMPTS:
-                print(f'Edge TTS returned no audio (attempt {attempt}); retrying...')
-                time.sleep(_retry_wait(attempt))
+        finally:
+            # Runs even when the loop above raised: a call that failed outright is at least
+            # as strong a throttling signal as one that merely needed a retry, so it must
+            # still drop the gate back to 1 rather than leaving a stale higher limit in
+            # place (and, either way, in_flight must be released for waiters to proceed).
+            self._gate.release(needed_retry)
 
         if not mp3:
             # The service took the text and sent nothing back, repeatedly. Yielding

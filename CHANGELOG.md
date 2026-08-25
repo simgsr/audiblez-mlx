@@ -25,13 +25,18 @@ added and then removed again within this range, so it never appeared in a tagged
 
 ### Changed
 
-- **Edge TTS requests are now batched.** Consecutive sentences are grouped into one request
-  per up to 1500 characters instead of one network round trip per sentence, so a book with
-  thousands of short sentences no longer pays thousands of serial round trips — a live run
-  spent ~76 minutes of CPU time across more than a day of wall clock, almost all of it
-  waiting on those individual round trips. A sentence already over the budget is still sent
-  whole rather than split further, since Edge has no length limit worth working around.
-  Kokoro and torch keep the existing one-call-per-sentence behavior, unaffected.
+- **Edge TTS requests are now batched, and dispatched with adaptive concurrency.**
+  Consecutive sentences are grouped into one request per up to 1500 characters instead of
+  one network round trip per sentence, so a book with thousands of short sentences no
+  longer pays thousands of serial round trips — a live run spent ~76 minutes of CPU time
+  across more than a day of wall clock, almost all of it waiting on those individual round
+  trips. A sentence already over the budget is still sent whole rather than split further,
+  since Edge has no length limit worth working around. On top of that, up to 3 batches can
+  be in flight at once — but only after a run of clean, first-attempt successes: Edge is
+  documented to silently throttle (return empty audio) when requests are issued back to
+  back, so concurrency starts fully serial and any retry drops it straight back to 1 rather
+  than assuming the earlier throttling measurement no longer applies. Kokoro and torch keep
+  the existing one-call-per-sentence, fully serial behavior, unaffected.
 - **Chapters now follow the book's table of contents instead of its file layout.** A chapter
   starts at each contents entry and runs to the next one, over as many documents as that
   takes, so books that spill one chapter across a dozen files (`index_split_006.html` …

@@ -66,7 +66,9 @@ pip install ".[edge]"
 Edge needs network at synthesis time and sends the book's text to Microsoft's servers, so
 it is never chosen by `auto`; pick it explicitly with `--backend edge`. Requests are
 batched — several consecutive sentences per network call, rather than one round trip per
-sentence — so wall-clock time on a long book is dominated by synthesis, not by the network.
+sentence — and a few batches at a time can be in flight together, ramping up gradually and
+dropping back to one at a time the moment a request needs a retry, since Edge is known to
+throttle requests fired back to back.
 
 ### Environment variables
 
