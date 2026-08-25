@@ -28,7 +28,7 @@ from pick import pick
 from audiblez import DEFAULT_OUTPUT_FOLDER
 from audiblez import chinese
 from audiblez import power
-from audiblez.backends import EdgeNoAudio, get_pipeline, initial_chars_per_sec, resolve_backend
+from audiblez.backends import EdgeNoAudio, EdgePipeline, get_pipeline, initial_chars_per_sec, resolve_backend
 from audiblez.voices import lang_code_for
 
 sample_rate = 24000
@@ -259,10 +259,56 @@ def measured_chars_per_sec(stats):
     return synthesized / elapsed
 
 
+_sentencizer = None
+
+
+def _get_sentencizer():
+    """The spaCy sentencizer, loaded once per process.
+
+    gen_audio_segments used to load it fresh on every call, i.e. once per chapter --
+    harmless for a handful of chapters but wasted load time repeated over a book with
+    hundreds of them, for a component that carries no per-chapter state.
+    """
+    global _sentencizer
+    if _sentencizer is None:
+        _sentencizer = spacy.load('xx_ent_wiki_sm')
+        _sentencizer.add_pipe('sentencizer')
+    return _sentencizer
+
+
+# Edge pays a full network round trip -- websocket handshake plus streamed synthesis --
+# for every pipeline call, so at one call per sentence a book with thousands of short
+# sentences becomes thousands of serial round trips, most of that wall time spent waiting
+# rather than synthesizing. Kokoro has no such per-call overhead worth amortizing, and
+# batching would fight the manual long-sentence split it already needs (backends.py), so
+# this only applies to Edge.
+EDGE_BATCH_CHARS = 1500
+
+
+def _batch_for_edge(sentences, max_chars=EDGE_BATCH_CHARS):
+    """Group consecutive sentences into chunks up to `max_chars`, for one Edge call each.
+
+    A sentence larger than `max_chars` still gets its own chunk rather than being split
+    further -- Edge has no length limit worth working around, unlike Kokoro.
+    """
+    batches = []
+    current = []
+    current_len = 0
+    for sent in sentences:
+        if current and current_len + len(sent) > max_chars:
+            batches.append(current)
+            current = []
+            current_len = 0
+        current.append(sent)
+        current_len += len(sent)
+    if current:
+        batches.append(current)
+    return batches
+
+
 def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None,
                        lang_code=None):
-    nlp = spacy.load('xx_ent_wiki_sm')
-    nlp.add_pipe('sentencizer')
+    nlp = _get_sentencizer()
     audio_segments = []
     lang_code = lang_code_for(voice, lang_code)
     # Before sentence splitting, so the segmenter sees the same characters the model will.
@@ -285,13 +331,25 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
             else:
                 sentences.append(sent.text)
 
-    for i, sent_text in enumerate(sentences):
-        if max_sentences and i > max_sentences: break
-        for gs, ps, audio in pipeline(sent_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
+    # Edge amortizes its round-trip cost over a batch of sentences; every other backend
+    # keeps the existing one-call-per-sentence behavior untouched (singleton "batches").
+    if isinstance(pipeline, EdgePipeline):
+        chunks = _batch_for_edge(sentences)
+    else:
+        chunks = [[s] for s in sentences]
+
+    sent_count = 0
+    for chunk in chunks:
+        if max_sentences and sent_count > max_sentences: break
+        # A singleton chunk is sent exactly as before; only a real multi-sentence Edge
+        # batch gets stripped and rejoined, so non-Edge output is bit-for-bit unchanged.
+        chunk_text = chunk[0] if len(chunk) == 1 else ' '.join(s.strip() for s in chunk)
+        for gs, ps, audio in pipeline(chunk_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
             audio_segments.append(audio)
+        sent_count += len(chunk)
         if stats:
-            stats.processed_chars += len(sent_text)
-            stats.synthesized_chars = getattr(stats, 'synthesized_chars', 0) + len(sent_text)
+            stats.processed_chars += len(chunk_text)
+            stats.synthesized_chars = getattr(stats, 'synthesized_chars', 0) + len(chunk_text)
             stats.progress = stats.processed_chars * 100 // stats.total_chars
             stats.chars_per_sec = measured_chars_per_sec(stats)
             stats.eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)

@@ -663,5 +663,91 @@ class SafeFilenameTest(unittest.TestCase):
         self.assertEqual(safe_filename_part('af_sky'), 'af_sky')
 
 
+class BatchForEdgeTest(unittest.TestCase):
+    """_batch_for_edge groups sentences for one Edge call each, without dropping any."""
+
+    def test_short_sentences_are_merged_into_one_batch(self):
+        from audiblez.core import _batch_for_edge
+        sentences = ['一。', '二。', '三。']
+        batches = _batch_for_edge(sentences, max_chars=100)
+        self.assertEqual(batches, [sentences])
+
+    def test_a_full_batch_starts_a_new_one(self):
+        from audiblez.core import _batch_for_edge
+        sentences = ['a' * 40, 'b' * 40, 'c' * 40]
+        batches = _batch_for_edge(sentences, max_chars=50)
+        self.assertEqual(batches, [['a' * 40], ['b' * 40], ['c' * 40]])
+
+    def test_a_sentence_over_the_budget_gets_its_own_batch_rather_than_being_split(self):
+        from audiblez.core import _batch_for_edge
+        huge = 'x' * 500
+        batches = _batch_for_edge(['short.', huge, 'short.'], max_chars=100)
+        self.assertEqual(batches, [['short.'], [huge], ['short.']])
+
+    def test_empty_input_yields_no_batches(self):
+        from audiblez.core import _batch_for_edge
+        self.assertEqual(_batch_for_edge([], max_chars=100), [])
+
+    def test_every_sentence_survives_regardless_of_grouping(self):
+        from audiblez.core import _batch_for_edge
+        sentences = [f'sentence {i}.' for i in range(37)]
+        batches = _batch_for_edge(sentences, max_chars=30)
+        flattened = [s for batch in batches for s in batch]
+        self.assertEqual(flattened, sentences)
+
+
+class GenAudioSegmentsEdgeBatchingTest(unittest.TestCase):
+    """gen_audio_segments batches consecutive sentences into one Edge call, and only Edge."""
+
+    class RecordingEdgePipeline(backends.EdgePipeline):
+        """A real EdgePipeline subclass (so isinstance checks pass) that never touches the
+        network: it just records the text of each call."""
+
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, text, voice, speed=1.0, split_pattern=None):
+            self.calls.append(text)
+            yield None, None, np.zeros(4, dtype='float32')
+
+    # English so spaCy's sentencizer actually splits on '.': the xx_ent_wiki_sm sentencizer
+    # used here does not split Chinese text on the full-width '。' (verified separately), so
+    # a Chinese sample would land as a single spaCy "sentence" and prove nothing about
+    # batching multiple sentences together.
+    FIVE_SENTENCES = ('This is sentence one. This is sentence two. This is sentence three. '
+                      'This is sentence four. This is sentence five.')
+
+    def test_edge_pipeline_receives_fewer_calls_than_there_are_sentences(self):
+        from audiblez.core import gen_audio_segments
+        pipeline = self.RecordingEdgePipeline()
+        gen_audio_segments(pipeline, self.FIVE_SENTENCES, voice='en-US-BrianNeural', speed=1.0)
+        self.assertEqual(len(pipeline.calls), 1, pipeline.calls)
+        self.assertEqual(pipeline.calls[0], self.FIVE_SENTENCES)
+
+    def test_edge_pipeline_still_splits_once_the_batch_budget_is_exceeded(self):
+        from audiblez.core import EDGE_BATCH_CHARS, gen_audio_segments
+        sentence = 'This is a filler sentence used to pad the batch past its budget. '
+        text = sentence * (EDGE_BATCH_CHARS // len(sentence) + 5)
+        pipeline = self.RecordingEdgePipeline()
+        gen_audio_segments(pipeline, text, voice='en-US-BrianNeural', speed=1.0)
+        self.assertGreater(len(pipeline.calls), 1)
+        for call in pipeline.calls:
+            self.assertLessEqual(len(call), EDGE_BATCH_CHARS + len(sentence))
+        expected_count = text.count('filler sentence')
+        actual_count = sum(call.count('filler sentence') for call in pipeline.calls)
+        self.assertEqual(actual_count, expected_count, 'no sentence should be dropped or duplicated')
+
+    def test_non_edge_pipelines_keep_one_call_per_sentence(self):
+        from audiblez.core import gen_audio_segments
+        calls = []
+
+        def fake_pipeline(sent_text, voice, speed=1.0, split_pattern=None):
+            calls.append(sent_text)
+            yield None, None, np.zeros(4, dtype='float32')
+
+        gen_audio_segments(fake_pipeline, self.FIVE_SENTENCES, voice='af_heart', speed=1.0)
+        self.assertEqual(len(calls), 5, calls)
+
+
 if __name__ == '__main__':
     unittest.main()
