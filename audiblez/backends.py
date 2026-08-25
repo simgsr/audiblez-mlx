@@ -238,6 +238,12 @@ class EdgePipeline:
     pattern.
     """
 
+    # gen_audio_segments groups consecutive sentences into chunks up to this many
+    # characters per call, to amortize Edge's per-call network round trip. It reads this
+    # attribute rather than special-casing EdgePipeline by isinstance, so any other backend
+    # that wants the same amortization can opt in the same way.
+    batch_chars = 1500
+
     def __init__(self, lang_code):
         self.lang_code = lang_code
 

@@ -4,6 +4,7 @@
 # Kokoro-82M model for high-quality text-to-speech synthesis.
 # by Claudio Santini 2025 - https://claudio.uk
 import os
+import threading
 import traceback
 from glob import glob
 
@@ -260,6 +261,13 @@ def measured_chars_per_sec(stats):
 
 
 _sentencizer = None
+# audiblez/ui.py can run gen_audio_segments from two threads at once -- the main
+# book-synthesis thread and a chapter-preview thread -- and the sentencizer below is now a
+# single instance shared across every call rather than one built fresh per call. spaCy's
+# Language objects (this one includes a tok2vec/NER component, not just the rule-based
+# sentencizer) are not documented as safe for concurrent nlp(text) calls, so both the lazy
+# load and every use of the pipeline are serialized through this lock.
+_sentencizer_lock = threading.Lock()
 
 
 def _get_sentencizer():
@@ -281,8 +289,8 @@ def _get_sentencizer():
 # sentences becomes thousands of serial round trips, most of that wall time spent waiting
 # rather than synthesizing. Kokoro has no such per-call overhead worth amortizing, and
 # batching would fight the manual long-sentence split it already needs (backends.py), so
-# this only applies to Edge.
-EDGE_BATCH_CHARS = 1500
+# this only applies to pipelines that opt in via `batch_chars` (currently just Edge).
+EDGE_BATCH_CHARS = EdgePipeline.batch_chars
 
 
 def _batch_for_edge(sentences, max_chars=EDGE_BATCH_CHARS):
@@ -313,7 +321,12 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
     lang_code = lang_code_for(voice, lang_code)
     # Before sentence splitting, so the segmenter sees the same characters the model will.
     text = chinese.normalize(text, lang_code, notify=print)
-    doc = nlp(text)
+    # Locked: this nlp is a single instance shared across every call (see _get_sentencizer),
+    # and gen_audio_segments can run concurrently from more than one thread (audiblez/ui.py
+    # runs book synthesis and chapter preview on separate threads), so calls into it are
+    # serialized rather than racing on its internal state.
+    with _sentencizer_lock:
+        doc = nlp(text)
 
     # Tuple membership, not `in 'ab'`: the substring form also matched '' and 'ab', so a
     # missing language code silently took the English path and skipped the long-sentence
@@ -331,22 +344,35 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
             else:
                 sentences.append(sent.text)
 
-    # Edge amortizes its round-trip cost over a batch of sentences; every other backend
-    # keeps the existing one-call-per-sentence behavior untouched (singleton "batches").
-    if isinstance(pipeline, EdgePipeline):
-        chunks = _batch_for_edge(sentences)
+    # Cap the sentence list itself, before batching, so the cap bounds how much text is
+    # actually synthesized regardless of how the pipeline groups sentences into calls. A
+    # post-hoc break on sent_count (the previous approach) is meaningless once a backend can
+    # fold many sentences into one chunk: sent_count would still read 0 when the first,
+    # possibly large, chunk gets synthesized. `+ 1` preserves the previous one-call-per-
+    # sentence behavior of stopping just after the max_sentences'th sentence.
+    if max_sentences is not None:
+        sentences = sentences[:max_sentences + 1]
+
+    # A pipeline opts into batching by exposing `batch_chars` (currently just EdgePipeline);
+    # every other pipeline keeps the existing one-call-per-sentence behavior (singleton
+    # "batches"). This amortizes Edge's per-call network round trip over several sentences.
+    batch_chars = getattr(pipeline, 'batch_chars', None)
+    if batch_chars:
+        chunks = _batch_for_edge(sentences, max_chars=batch_chars)
     else:
         chunks = [[s] for s in sentences]
 
-    sent_count = 0
+    # Deliberately serial, chunk by chunk, even though the chunks are independent and this
+    # leaves Edge's round-trip latency on the critical path: EdgePipeline's own retry logic
+    # (backends.py) exists because Edge silently throttles -- returns empty audio -- when
+    # requests are issued back to back. Dispatching chunks concurrently would fire exactly
+    # that pattern on purpose, trading network wait for more throttling and retries.
     for chunk in chunks:
-        if max_sentences and sent_count > max_sentences: break
-        # A singleton chunk is sent exactly as before; only a real multi-sentence Edge
-        # batch gets stripped and rejoined, so non-Edge output is bit-for-bit unchanged.
-        chunk_text = chunk[0] if len(chunk) == 1 else ' '.join(s.strip() for s in chunk)
+        # Every sentence is stripped before joining, singleton chunks included, so a chunk's
+        # text depends only on the sentences it contains, never on how batching grouped them.
+        chunk_text = ' '.join(s.strip() for s in chunk)
         for gs, ps, audio in pipeline(chunk_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
             audio_segments.append(audio)
-        sent_count += len(chunk)
         if stats:
             stats.processed_chars += len(chunk_text)
             stats.synthesized_chars = getattr(stats, 'synthesized_chars', 0) + len(chunk_text)
