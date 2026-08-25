@@ -3,6 +3,7 @@
 # audiblez - A program to convert e-books into audiobooks using
 # Kokoro-82M model for high-quality text-to-speech synthesis.
 # by Claudio Santini 2025 - https://claudio.uk
+import concurrent.futures
 import os
 import threading
 import traceback
@@ -319,6 +320,17 @@ def _batch_for_edge(sentences, max_chars=EDGE_BATCH_CHARS):
     return batches
 
 
+def _record_progress(stats, chunk_text, post_event):
+    stats.processed_chars += len(chunk_text)
+    stats.synthesized_chars = getattr(stats, 'synthesized_chars', 0) + len(chunk_text)
+    stats.progress = stats.processed_chars * 100 // stats.total_chars
+    stats.chars_per_sec = measured_chars_per_sec(stats)
+    stats.eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
+    if post_event: post_event('CORE_PROGRESS', stats=stats)
+    print(f'Estimated time remaining: {stats.eta}')
+    print('Progress:', f'{stats.progress}%\n')
+
+
 def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None,
                        lang_code=None):
     nlp = _get_sentencizer()
@@ -367,26 +379,36 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
     else:
         chunks = [[s] for s in sentences]
 
-    # Deliberately serial, chunk by chunk, even though the chunks are independent and this
-    # leaves Edge's round-trip latency on the critical path: EdgePipeline's own retry logic
-    # (backends.py) exists because Edge silently throttles -- returns empty audio -- when
-    # requests are issued back to back. Dispatching chunks concurrently would fire exactly
-    # that pattern on purpose, trading network wait for more throttling and retries.
-    for chunk in chunks:
+    def _synthesize_chunk(chunk):
         # Every sentence is stripped before joining, singleton chunks included, so a chunk's
         # text depends only on the sentences it contains, never on how batching grouped them.
         chunk_text = ' '.join(s.strip() for s in chunk)
-        for gs, ps, audio in pipeline(chunk_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
-            audio_segments.append(audio)
-        if stats:
-            stats.processed_chars += len(chunk_text)
-            stats.synthesized_chars = getattr(stats, 'synthesized_chars', 0) + len(chunk_text)
-            stats.progress = stats.processed_chars * 100 // stats.total_chars
-            stats.chars_per_sec = measured_chars_per_sec(stats)
-            stats.eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
-            if post_event: post_event('CORE_PROGRESS', stats=stats)
-            print(f'Estimated time remaining: {stats.eta}')
-            print('Progress:', f'{stats.progress}%\n')
+        audios = [audio for _, _, audio in
+                  pipeline(chunk_text, voice=voice, speed=speed, split_pattern=r'\n\n\n')]
+        return chunk_text, audios
+
+    # A pipeline opts into concurrent dispatch by exposing `max_concurrency` > 1 (currently
+    # just EdgePipeline). Chunks are submitted to a thread pool up to that many at once, but
+    # how many actually reach the network at the same time is governed by the pipeline's own
+    # adaptive gate (EdgePipeline / _AdaptiveConcurrencyGate in backends.py): it starts fully
+    # serial and only grows after a run of clean successes, dropping straight back to 1 on
+    # any retry -- rather than firing every request back to back on purpose, which is exactly
+    # the pattern Edge is documented to throttle. executor.map yields results in chunk order
+    # even though the work underneath runs concurrently, so audio order and progress
+    # reporting are unaffected by however many chunks actually overlapped.
+    max_concurrency = getattr(pipeline, 'max_concurrency', 1)
+    if max_concurrency > 1 and chunks:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrency) as pool:
+            for chunk_text, audios in pool.map(_synthesize_chunk, chunks):
+                audio_segments.extend(audios)
+                if stats:
+                    _record_progress(stats, chunk_text, post_event)
+    else:
+        for chunk in chunks:
+            chunk_text, audios = _synthesize_chunk(chunk)
+            audio_segments.extend(audios)
+            if stats:
+                _record_progress(stats, chunk_text, post_event)
     return audio_segments
 
 
