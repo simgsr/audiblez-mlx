@@ -112,18 +112,38 @@ def is_catalog_voice(voice):
             or any(voice in names for names in edge_voices.values()))
 
 
+def cosyvoice_lang_code(voice):
+    """Kokoro-style language code for a CosyVoice reference-voice prompt id.
+
+    CosyVoice prompt ids carry their language as a prefix ('en_amanda', 'zh_ava',
+    'en', 'zh'). Map them to the codes the rest of the tool understands: 'a' for
+    English (the no-long-sentence-split path), 'z' for Chinese.
+    """
+    if not voice or not isinstance(voice, str):
+        return ''
+    head = voice.split('_', 1)[0].lower()
+    if head == 'en':
+        return 'a'
+    if head == 'zh':
+        return 'z'
+    return ''
+
+
 def lang_code_for(voice, lang_code=None):
     """The language code `voice` narrates in.
 
     An explicit code wins. Edge voices carry their locale in the name
     ('zh-TW-HsiaoChenNeural' -> 'zh-TW'); Kokoro voices use the first letter
     ('af_sky' -> 'a'). A .pt path has no language in the name, so callers pass
-    --lang explicitly for those.
+    --lang explicitly for those. CosyVoice prompt ids map via their prefix.
     """
     if lang_code:
         return lang_code
     if is_edge_voice(voice):
         return '-'.join(voice.split('-')[:2])
+    cosy = cosyvoice_lang_code(voice)
+    if cosy:
+        return cosy
     return voice[0] if voice else ''
 
 
