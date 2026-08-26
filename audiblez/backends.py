@@ -8,12 +8,10 @@ weights, so the choice is purely about speed and platform.
 The MLX pipeline is adapted to Kokoro's own call signature, so `gen_audio_segments` --
 and everything downstream of it -- does not need to know which engine is running.
 """
-import json
 import os
 import platform
 import re
 import subprocess
-import tempfile
 import threading
 import time
 from glob import glob
@@ -21,32 +19,12 @@ from pathlib import Path
 
 from audiblez.voices import is_edge_voice, lang_code_for
 
-BACKENDS = ('auto', 'torch', 'mlx', 'edge', 'cosyvoice')
+BACKENDS = ('auto', 'torch', 'mlx', 'edge')
 
 DEFAULT_REPOS = {
     'torch': 'hexgrad/Kokoro-82M',
     'mlx': 'mlx-community/Kokoro-82M-bf16',
 }
-
-# CosyVoice2 assets. This machine already has the CosyVoice repo, model and the
-# reference-voice prompt dir (shared with the yue reader); the worker subprocess
-# script lives in the yue checkout. All overridable via the YUE_COSYVOICE_* env
-# vars for portability.
-COSYVOICE_REPO = os.environ.get(
-    'YUE_COSYVOICE_REPO',
-    '/Users/randallsim/Documents/python_project/tts-training/CosyVoice')
-COSYVOICE_MODEL_DIR = os.environ.get(
-    'YUE_COSYVOICE_MODEL_DIR',
-    '/Users/randallsim/Documents/python_project/tts-training/pretrained_models/CosyVoice2-0.5B')
-COSYVOICE_PROMPT_DIR = os.environ.get(
-    'YUE_COSYVOICE_PROMPT_DIR',
-    '/Users/randallsim/Documents/python_project/tts-training/cosyvoice_prompts')
-COSYVOICE_WORKER_PYTHON = os.environ.get(
-    'YUE_COSYVOICE_WORKER_PYTHON',
-    '/Users/randallsim/Documents/python_project/tts-training/.venv-cosyvoice/bin/python')
-COSYVOICE_WORKER_SCRIPT = os.environ.get(
-    'YUE_COSYVOICE_WORKER_SCRIPT',
-    '/Users/randallsim/Documents/interesting_git_project/yue/yue/tts/cosyvoice_tts_worker.py')
 
 # Any non-whitespace character means there is something to narrate.
 _SPEAKABLE_RE = re.compile(r'\S')
@@ -58,7 +36,6 @@ CHARS_PER_SEC_GUESS = {
     'torch_cuda': 500,
     'torch_cpu': 50,
     'edge': 150,       # network-bound; conservative, recalibrates within the first chapter
-    'cosyvoice': 20,   # ~0.5-0.7x realtime LLM+flow on MPS; slow but honest
 }
 
 # Per-language overrides. Characters are not equal units of speech: a CJK character carries
@@ -67,7 +44,6 @@ CHARS_PER_SEC_GUESS = {
 # is optimistic by roughly 4-6x, which is worst precisely when the run is longest.
 CHARS_PER_SEC_BY_LANG = {
     'mlx': {'z': 150},   # measured on an M5 Max
-    'cosyvoice': {'z': 8},   # Chinese is slower than English for CosyVoice2 too
 }
 
 
@@ -112,21 +88,6 @@ def edge_available():
     return True
 
 
-def cosyvoice_available():
-    """True when the CosyVoice2 worker assets are present.
-
-    CosyVoice2 is reference-voice (zero-shot): it needs the model, the worker venv,
-    and the prompt (reference) dir. Absence is normal rather than an error -- this
-    machine has them via the yue/tts-training setup.
-    """
-    return (
-        os.path.exists(COSYVOICE_WORKER_PYTHON)
-        and os.path.exists(COSYVOICE_WORKER_SCRIPT)
-        and os.path.exists(COSYVOICE_PROMPT_DIR)
-        and os.path.exists(COSYVOICE_MODEL_DIR)
-    )
-
-
 def resolve_backend(backend='auto'):
     """Turn 'auto' into a concrete backend name."""
     if backend not in BACKENDS:
@@ -148,8 +109,6 @@ def initial_chars_per_sec(backend, lang_code=None):
         key = 'mlx'
     elif resolved == 'edge':
         key = 'edge'
-    elif resolved == 'cosyvoice':
-        key = 'cosyvoice'
     else:
         key = 'torch_cpu'
         try:
@@ -411,90 +370,6 @@ class EdgePipeline:
         yield None, None, audio
 
 
-class CosyVoicePipeline:
-    """CosyVoice2 reference-voice TTS, wearing the pipeline callable signature.
-
-    CosyVoice2 is zero-shot: the voice is a reference-voice prompt id (a ``<id>.wav`` +
-    ``<id>.txt`` pair in the prompt dir, e.g. ``en_amanda`` or ``zh_ava``) that the model
-    clones live for every chunk. It runs as a subprocess under the cosyvoice venv,
-    talking JSON-lines over stdin/stdout (the same worker the yue reader uses).
-
-    Yields ``(None, None, audio)`` per call like the Kokoro/Edge pipelines. Serial only:
-    a single worker drives MPS, so ``max_concurrency`` stays 1 and each call is serialized
-    on a lock. The worker is torn down on process exit via ``atexit``.
-    """
-
-    max_concurrency = 1
-
-    def __init__(self, lang_code=None):
-        import atexit
-        self.lang_code = lang_code
-        self._proc = None
-        self._lock = threading.Lock()
-        self._out = tempfile.mktemp(suffix='.wav', prefix='audiblez_cosy_')
-        atexit.register(self.close)
-
-    def _ensure_worker(self):
-        if self._proc is not None:
-            return
-        env = dict(os.environ)
-        env['YUE_COSYVOICE_REPO'] = COSYVOICE_REPO
-        env['YUE_COSYVOICE_MODEL_DIR'] = COSYVOICE_MODEL_DIR
-        env['YUE_COSYVOICE_PROMPT_DIR'] = COSYVOICE_PROMPT_DIR
-        self._proc = subprocess.Popen(
-            [COSYVOICE_WORKER_PYTHON, COSYVOICE_WORKER_SCRIPT],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, env=env, text=True)
-        try:
-            line = self._proc.stdout.readline()
-        except Exception:
-            self._proc = None
-            raise
-        resp = json.loads(line)
-        if 'error' in resp:
-            self.close()
-            raise RuntimeError(f"CosyVoice worker failed to start: {resp['error']}")
-
-    def __call__(self, text, voice, speed=1.0, split_pattern=None):
-        import numpy as np
-        import soundfile
-        # Nothing to narrate: yield no segment rather than ask the model to read silence.
-        if not _SPEAKABLE_RE.search(text or ''):
-            return
-        self._ensure_worker()
-        with self._lock:
-            self._proc.stdin.write(
-                json.dumps({'text': text, 'voice': voice, 'out': self._out}) + '\n')
-            self._proc.stdin.flush()
-            try:
-                resp = json.loads(self._proc.stdout.readline())
-            except (ValueError, json.JSONDecodeError) as e:
-                raise RuntimeError(
-                    f'CosyVoice worker sent a bad reply: {e}') from e
-            if 'error' in resp:
-                raise RuntimeError(f"CosyVoice synthesis failed: {resp['error']}")
-            audio, _ = soundfile.read(resp['path'], dtype='float32')
-        yield None, None, audio
-
-    def close(self):
-        proc, self._proc = self._proc, None
-        if proc is not None:
-            try:
-                if proc.stdin:
-                    proc.stdin.close()
-                proc.wait(timeout=3)
-            except Exception:  # noqa: BLE001
-                try:
-                    proc.kill()
-                except Exception:  # noqa: BLE001
-                    pass
-        try:
-            if os.path.exists(self._out):
-                os.remove(self._out)
-        except Exception:  # noqa: BLE001
-            pass
-
-
 def get_pipeline(voice, lang_code=None, backend='auto', repo_id=None):
     """Build a TTS pipeline callable for `voice`.
 
@@ -517,13 +392,6 @@ def get_pipeline(voice, lang_code=None, backend='auto', repo_id=None):
                     else 'It needs Apple Silicon; use --backend torch on this machine.')
             raise RuntimeError(f'The mlx backend is not available. {hint}')
         return MlxKokoroPipeline(lang_code, repo_id)
-    if resolved == 'cosyvoice':
-        if not cosyvoice_available():
-            raise RuntimeError(
-                'The cosyvoice backend is not available on this machine (missing the '
-                'CosyVoice model, worker venv, or prompt dir). See the COSYVOICE_* paths '
-                'in audiblez/backends.py.')
-        return CosyVoicePipeline(lang_code)
     if resolved == 'edge':
         if not edge_available():
             raise RuntimeError(

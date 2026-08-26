@@ -165,19 +165,6 @@ Measured on an M5 Max, synthesizing the same paragraph with `af_sky`:
 |---|---|---|
 | MLX (`Kokoro-82M-bf16`) | **906 chars/sec** | 47x |
 | Torch (`Kokoro-82M`, CPU) | 238 chars/sec | 12x |
-| CosyVoice2 (MPS) | ~20 chars/sec | ~0.5-0.7x |
-
-### CosyVoice backend
-
-`--backend cosyvoice` narrates with **CosyVoice2**, a local reference-voice (zero-shot)
-clone: the `voice` is a prompt id (a `<id>.wav` + `<id>.txt` pair in the prompt dir), so
-you can narrate a whole book in any cloned voice (e.g. `en_amanda`, `zh_ava`). It runs the
-same worker subprocess the yue reader uses, on this machine's CosyVoice model/venv/prompt
-dir (overridable via `YUE_COSYVOICE_REPO`, `YUE_COSYVOICE_MODEL_DIR`,
-`YUE_COSYVOICE_PROMPT_DIR`, `YUE_COSYVOICE_WORKER_PYTHON`, `YUE_COSYVOICE_WORKER_SCRIPT`).
-
-It is much slower than the other backends (~0.5-0.7x realtime) and serial (a single worker),
-so it is best when you specifically want a cloned voice and can wait; `auto` never picks it.
 
 ## Supported Voices
 

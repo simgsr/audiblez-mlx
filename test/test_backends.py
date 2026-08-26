@@ -49,7 +49,6 @@ class ResolveBackendTest(unittest.TestCase):
         self.assertEqual(resolve_backend('torch'), 'torch')
         self.assertEqual(resolve_backend('mlx'), 'mlx')
         self.assertEqual(resolve_backend('edge'), 'edge')
-        self.assertEqual(resolve_backend('cosyvoice'), 'cosyvoice')
 
     def test_unknown_backend_is_rejected(self):
         with self.assertRaises(ValueError) as ctx:
@@ -125,16 +124,6 @@ class InitialChoresPerSecTest(unittest.TestCase):
             for lang in ('a', 'b', 'f', None):
                 self.assertEqual(backends.initial_chars_per_sec('mlx', lang),
                                  backends.CHARS_PER_SEC_GUESS['mlx'])
-
-    def test_cosyvoice_uses_its_own_seed(self):
-        with mock.patch.object(backends, 'resolve_backend', return_value='cosyvoice'):
-            self.assertEqual(backends.initial_chars_per_sec('cosyvoice'),
-                             backends.CHARS_PER_SEC_GUESS['cosyvoice'])
-
-    def test_cosyvoice_chinese_seed_is_slower(self):
-        with mock.patch.object(backends, 'resolve_backend', return_value='cosyvoice'):
-            self.assertEqual(backends.initial_chars_per_sec('cosyvoice', 'z'),
-                             backends.CHARS_PER_SEC_BY_LANG['cosyvoice']['z'])
 
 
 class MlxAdapterTest(unittest.TestCase):
@@ -946,38 +935,6 @@ class SentencizerAutoDownloadTest(unittest.TestCase):
              mock.patch.object(core, 'load_spacy') as load_spacy:
             core._get_sentencizer()
         load_spacy.assert_called_once()
-
-
-class CosyVoiceBackendTest(unittest.TestCase):
-    def test_get_pipeline_when_available(self):
-        with mock.patch.object(backends, 'cosyvoice_available', return_value=True):
-            p = get_pipeline('en_amanda', backend='cosyvoice')
-            self.assertIsInstance(p, backends.CosyVoicePipeline)
-            p.close()
-
-    def test_get_pipeline_when_unavailable(self):
-        with mock.patch.object(backends, 'cosyvoice_available', return_value=False):
-            with self.assertRaises(RuntimeError) as ctx:
-                get_pipeline('en_amanda', backend='cosyvoice')
-        self.assertIn('cosyvoice', str(ctx.exception))
-
-    def test_unspeakable_text_never_spawns_worker(self):
-        # Blank/whitespace text must yield nothing without launching the subprocess.
-        with mock.patch('subprocess.Popen',
-                        side_effect=AssertionError('worker must not spawn')), \
-             mock.patch.object(backends, 'cosyvoice_available', return_value=True):
-            p = get_pipeline('en_amanda', backend='cosyvoice')
-            got = list(p('   \n  ', voice='en_amanda'))
-            p.close()
-        self.assertEqual(got, [])
-
-    def test_cosyvoice_prompt_lang_mapping(self):
-        from audiblez.voices import lang_code_for
-        self.assertEqual(lang_code_for('en_amanda'), 'a')
-        self.assertEqual(lang_code_for('zh_ava'), 'z')
-        # Non-cosyvoice voices are unaffected.
-        self.assertEqual(lang_code_for('af_sky'), 'a')
-        self.assertEqual(lang_code_for('zh-TW-HsiaoChenNeural'), 'zh-TW')
 
 
 if __name__ == '__main__':

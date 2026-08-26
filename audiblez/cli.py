@@ -28,11 +28,9 @@ def cli_main():
     parser.add_argument('-o', '--output', default=DEFAULT_OUTPUT_FOLDER, metavar='FOLDER',
                         help=f'Output folder for the audiobook and intermediate files '
                              f'(default: {DEFAULT_OUTPUT_FOLDER}/, created if missing)')
-    parser.add_argument('-b', '--backend', default='auto', choices=['auto', 'torch', 'mlx', 'edge', 'cosyvoice'],
+    parser.add_argument('-b', '--backend', default='auto', choices=['auto', 'torch', 'mlx', 'edge'],
                         help='TTS engine: mlx is Apple-Silicon only and faster, auto picks it when available; '
-                             'edge is Microsoft\'s online TTS (needs network); '
-                             'cosyvoice is a local reference-voice clone (slow, needs CosyVoice assets, '
-                             'voice = a prompt id like en_amanda / zh_ava)')
+                             'edge is Microsoft\'s online TTS (needs network)')
     parser.add_argument('--lang', default=None, metavar='CODE',
                         help='Language code: Kokoro (a, b, e, f, h, i, j, p, z) or an Edge locale '
                              '(en-US, zh-TW, zh-HK, ...). Defaults to the first letter of the voice name, '
