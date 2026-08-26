@@ -563,6 +563,11 @@ class MainWindow(wx.Frame):
                 if locale not in self.selected_languages:
                     continue
                 for v in edge_voices[locale]:
+                    # Only the multilingual Edge voices are offered: a single voice
+                    # that can narrate in many languages, which is what the dropdown
+                    # is for. Non-multilingual voices can still be typed in by name.
+                    if 'Multilingual' not in v:
+                        continue
                     choices.append(f'{edge_flags[locale]} {v}')
         else:
             for code in self.language_codes:

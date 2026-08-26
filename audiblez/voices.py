@@ -69,10 +69,9 @@ _EDGE_VOICE_RE = re.compile(r'^[a-z]{2,}-[A-Z]{2,}-.+Neural$')
 # languages -- or all 16 Edge locales, ~50 voices -- into one dropdown, burying the handful
 # anyone actually narrates in. The rest stay one click away.
 DEFAULT_LANGUAGES = frozenset({'a', 'b', 'z'})   # Kokoro: american, british, chinese
-# Named one by one rather than by 'en-'/'zh-' prefix: the prefix form also ticked en-AU,
-# en-CA, en-IN and zh-HK, which is more choice than the dropdown wants by default. The
-# remaining locales are still offered, just unticked.
-DEFAULT_LOCALES = frozenset({'en-US', 'en-GB', 'zh-CN', 'zh-TW'})
+# Edge defaults to every locale ticked: the voice dropdown is filtered to the multilingual
+# voices anyway, so there is no reason to hide any locale by default.
+DEFAULT_LOCALES = frozenset(edge_voices.keys())
 
 
 def is_default_language(code):

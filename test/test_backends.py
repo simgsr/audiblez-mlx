@@ -703,7 +703,9 @@ class GenTextLangCodeTest(unittest.TestCase):
 
 
 class DefaultLanguagesTest(unittest.TestCase):
-    """Which languages the GUI ticks on startup: English and Chinese, not everything.
+    """Which languages the GUI ticks on startup: Kokoro narrows to English and
+    Chinese, while Edge ticks every locale (its voice dropdown is filtered to the
+    multilingual voices anyway).
 
     Lives here rather than in a UI test because wxPython is an optional extra that CI does
     not install -- and the rule is pure data, with no widget involved.
@@ -712,25 +714,19 @@ class DefaultLanguagesTest(unittest.TestCase):
     def test_kokoro_codes_narrow_to_english_and_chinese(self):
         self.assertEqual(default_languages(list(voices.keys())), {'a', 'b', 'z'})
 
-    def test_edge_locales_narrow_to_the_four_wanted(self):
+    def test_edge_locales_default_to_all(self):
         chosen = default_languages(list(edge_voices.keys()))
-        self.assertEqual(chosen, {'en-US', 'en-GB', 'zh-CN', 'zh-TW'})
+        self.assertEqual(chosen, set(edge_voices.keys()))
 
-    def test_other_languages_are_left_unticked(self):
-        for code in ('e', 'f', 'h', 'i', 'j', 'p', 'ja-JP', 'de-DE', 'pt-BR', 'hi-IN'):
+    def test_kokoro_other_languages_are_left_unticked(self):
+        for code in ('e', 'f', 'h', 'i', 'j', 'p'):
             self.assertFalse(is_default_language(code), f'{code} should start unticked')
-
-    def test_secondary_english_and_chinese_locales_are_unticked(self):
-        # Ticked by the earlier 'en-'/'zh-' prefix rule; deliberately not any more.
-        for code in ('en-AU', 'en-CA', 'en-IN', 'zh-HK'):
-            self.assertFalse(is_default_language(code), f'{code} should start unticked')
-            self.assertIn(code, edge_voices, f'{code} must still be offered')
 
     def test_every_offered_language_is_still_available(self):
-        # Narrowing the ticks must not narrow the list itself: the others are one click away.
-        for codes in (list(voices.keys()), list(edge_voices.keys())):
-            self.assertTrue(default_languages(codes).issubset(set(codes)))
-            self.assertLess(len(default_languages(codes)), len(codes))
+        # Kokoro narrows the ticks but not the list itself; Edge ticks everything.
+        self.assertTrue(default_languages(list(voices.keys())).issubset(set(voices.keys())))
+        self.assertLess(len(default_languages(list(voices.keys()))), len(voices))
+        self.assertEqual(default_languages(list(edge_voices.keys())), set(edge_voices.keys()))
 
     def test_unrecognised_codes_fall_back_to_everything(self):
         # An empty tick set would mean an empty voice dropdown, which is worse than noise.
