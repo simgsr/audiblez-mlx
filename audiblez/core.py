@@ -995,6 +995,12 @@ def create_m4b(chapter_files, filename, cover_image, output_folder):
 
         '-map_metadata', '1', # Map metadata
 
+        # Write the moov box (which holds the chapter table) to the start of the
+        # file. Without this, the moov is at the end, and Apple Books on iOS
+        # has to seek through the whole audio to read it, so large books end up
+        # with no chapter menu. macOS tolerates moov-at-end, iOS often does not.
+        '-movflags', '+faststart',
+
         '-f', 'mp4',  # Output as M4B
         f'{final_filename}'  # Output file
     ])
