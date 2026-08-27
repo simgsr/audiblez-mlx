@@ -56,6 +56,17 @@ pip install ".[torch]"
 > installs on Apple Silicon, so a plain `pip install .` elsewhere leaves you with no speech
 > engine at all.
 
+**On a PC / Linux**, the one-liner that installs everything you need (core + torch + edge)
+is:
+
+```bash
+pip install -r requirements.txt
+```
+
+That file mirrors `pyproject.toml` and includes the `[torch]` and `[edge]` extras, so
+`edge-tts` is installed too. (The `[gui]` extra is left out; add it with
+`pip install ".[gui]"` if you want the desktop UI.)
+
 To also get the **Edge backend** — Microsoft's online neural voices, including real
 Cantonese and native traditional-script reading — add the extra:
 

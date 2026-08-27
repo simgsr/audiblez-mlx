@@ -2,6 +2,9 @@ import os
 import unittest
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from unittest import mock
+
+from audiblez.cli import check_backend_installed
 
 
 class CliTest(unittest.TestCase):
@@ -57,3 +60,43 @@ class CliTest(unittest.TestCase):
         self.assertIn('Creating M4B file', out)
         self.assertTrue(Path('text.mp4').exists())
         self.assertTrue(Path('text.mp4').stat().st_size > 256 * 1024)
+
+
+class CheckBackendInstalledTest(unittest.TestCase):
+    """check_backend_installed fails fast with an actionable message when a backend
+    can't run, and passes silently when it can."""
+
+    def run_check(self, backend, mlx=False, torch=False, edge=False, apple=False):
+        with mock.patch('audiblez.cli.mlx_available', return_value=mlx), \
+             mock.patch('audiblez.cli.torch_available', return_value=torch), \
+             mock.patch('audiblez.cli.edge_available', return_value=edge), \
+             mock.patch('audiblez.cli.is_apple_silicon', return_value=apple), \
+             mock.patch('audiblez.cli.sys.exit', side_effect=SystemExit) as exit_:
+            try:
+                check_backend_installed(backend)
+            except SystemExit:
+                pass
+            return exit_.call_count
+
+    def test_explicit_backend_present_passes(self):
+        self.assertEqual(self.run_check('edge', edge=True), 0)
+        self.assertEqual(self.run_check('torch', torch=True), 0)
+        self.assertEqual(self.run_check('mlx', mlx=True), 0)
+
+    def test_explicit_edge_missing_fails(self):
+        self.assertEqual(self.run_check('edge', edge=False), 1)
+
+    def test_explicit_torch_missing_fails(self):
+        self.assertEqual(self.run_check('torch', torch=False), 1)
+
+    def test_auto_with_local_backend_passes(self):
+        self.assertEqual(self.run_check('auto', mlx=True), 0)
+        self.assertEqual(self.run_check('auto', torch=True), 0)
+
+    def test_auto_nothing_installed_fails(self):
+        self.assertEqual(self.run_check('auto', apple=False), 1)
+        self.assertEqual(self.run_check('auto', apple=True), 1)
+
+    def test_auto_only_edge_installed_fails(self):
+        # auto never picks edge, so it must tell the user to pass --backend edge.
+        self.assertEqual(self.run_check('auto', edge=True), 1)

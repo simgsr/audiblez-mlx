@@ -3,7 +3,49 @@ import argparse
 import sys
 
 from audiblez import DEFAULT_OUTPUT_FOLDER
+from audiblez.backends import edge_available, is_apple_silicon, mlx_available, torch_available
 from audiblez.voices import voices, available_voices_str, edge_voices_str
+
+
+def check_backend_installed(backend):
+    """Fail fast with an actionable message when the chosen backend can't run.
+
+    Without this, a bare `pip install .` on a non-Apple machine (where mlx-audio does
+    not install) leaves you with no speech engine at all, and the failure only surfaces
+    later and less clearly. This catches it up front and names the exact install command.
+    """
+    if backend == 'edge':
+        if not edge_available():
+            print('The edge backend is not installed. Add it with: pip install ".[edge]"')
+            sys.exit(1)
+        return
+    if backend == 'mlx':
+        if not mlx_available():
+            print('The mlx backend is not available. ' + (
+                'Install it with: pip install mlx-audio "misaki[en]"' if is_apple_silicon()
+                else 'It needs Apple Silicon; use --backend torch on this machine.'))
+            sys.exit(1)
+        return
+    if backend == 'torch':
+        if not torch_available():
+            print('The torch backend is not installed. Add it with: pip install ".[torch]"')
+            sys.exit(1)
+        return
+    # auto: mlx when available, else torch. Edge is never chosen by auto.
+    if mlx_available() or torch_available():
+        return
+    if edge_available():
+        print('No local TTS backend is installed, but the Edge backend is. '
+              'Run with --backend edge, or install a local backend with: '
+              'pip install ".[torch]"')
+        sys.exit(1)
+    if is_apple_silicon():
+        print('No TTS backend is installed. Run: pip install .  '
+              '(or pip install ".[edge]" for Edge voices)')
+    else:
+        print('No TTS backend is installed. On this machine you need the torch backend:\n'
+              '  pip install ".[torch,edge]"')
+    sys.exit(1)
 
 
 def cli_main():
@@ -42,6 +84,8 @@ def cli_main():
         parser.print_help(sys.stderr)
         sys.exit(1)
     args = parser.parse_args()
+
+    check_backend_installed(args.backend)
 
     if args.cuda:
         try:
