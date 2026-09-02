@@ -10,9 +10,9 @@ from audiblez.voices import voices, available_voices_str, edge_voices_str
 def check_backend_installed(backend):
     """Fail fast with an actionable message when the chosen backend can't run.
 
-    Without this, a bare `pip install .` on a non-Apple machine (where mlx-audio does
-    not install) leaves you with no speech engine at all, and the failure only surfaces
-    later and less clearly. This catches it up front and names the exact install command.
+    Without this, a bare `pip install .` would leave you with no speech engine at all in
+    some setups, and the failure would only surface later and less clearly. This catches
+    it up front and names the exact install command.
     """
     if backend == 'edge':
         if not edge_available():
@@ -22,29 +22,30 @@ def check_backend_installed(backend):
     if backend == 'mlx':
         if not mlx_available():
             print('The mlx backend is not available. ' + (
-                'Install it with: pip install mlx-audio "misaki[en]"' if is_apple_silicon()
-                else 'It needs Apple Silicon; use --backend torch on this machine.'))
+                'Install it with: pip install ".[mlx]"' if is_apple_silicon()
+                else 'It needs Apple Silicon; use the default torch backend on this machine.'))
             sys.exit(1)
         return
     if backend == 'torch':
         if not torch_available():
-            print('The torch backend is not installed. Add it with: pip install ".[torch]"')
+            print('The torch backend is not installed. Install the default engine with: '
+                  'pip install .   (or pip install -r requirements.txt)')
             sys.exit(1)
         return
-    # auto: mlx when available, else torch. Edge is never chosen by auto.
-    if mlx_available() or torch_available():
+    # auto: torch when available, else mlx. Edge is never chosen by auto.
+    if torch_available() or mlx_available():
         return
     if edge_available():
         print('No local TTS backend is installed, but the Edge backend is. '
               'Run with --backend edge, or install a local backend with: '
-              'pip install ".[torch]"')
+              'pip install .')
         sys.exit(1)
     if is_apple_silicon():
         print('No TTS backend is installed. Run: pip install .  '
               '(or pip install ".[edge]" for Edge voices)')
     else:
         print('No TTS backend is installed. On this machine you need the torch backend:\n'
-              '  pip install ".[torch,edge]"')
+              '  pip install .   (the [edge] extra is optional)')
     sys.exit(1)
 
 
@@ -66,13 +67,14 @@ def cli_main():
     parser.add_argument('-s', '--speed', default=1.0, help=f'Set speed from 0.5 to 2.0', type=float)
     parser.add_argument('-c', '--cuda', default=False, action='store_true',
                         help='Use an Nvidia GPU via Torch. Ignored on Apple Silicon, where the '
-                             'mlx backend already runs on the GPU')
+                             'torch backend runs with --cuda unset')
     parser.add_argument('-o', '--output', default=DEFAULT_OUTPUT_FOLDER, metavar='FOLDER',
                         help=f'Output folder for the audiobook and intermediate files '
                              f'(default: {DEFAULT_OUTPUT_FOLDER}/, created if missing)')
     parser.add_argument('-b', '--backend', default='auto', choices=['auto', 'torch', 'mlx', 'edge'],
-                        help='TTS engine: mlx is Apple-Silicon only and faster, auto picks it when available; '
-                             'edge is Microsoft\'s online TTS (needs network)')
+                        help='TTS engine: torch is the default (portable); auto picks it when '
+                             'installed; mlx is Apple-Silicon only and faster; edge is Microsoft\'s '
+                             'online TTS (needs network)')
     parser.add_argument('--lang', default=None, metavar='CODE',
                         help='Language code: Kokoro (a, b, e, f, h, i, j, p, z) or an Edge locale '
                              '(en-US, zh-TW, zh-HK, ...). Defaults to the first letter of the voice name, '
@@ -91,7 +93,7 @@ def cli_main():
         try:
             import torch
         except ImportError:
-            print('--cuda needs the torch backend: pip install ".[torch]"')
+            print('--cuda needs the torch backend: pip install .')
             sys.exit(1)
         if torch.cuda.is_available():
             print('CUDA GPU available')

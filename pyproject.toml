@@ -1,7 +1,7 @@
 [project]
 name = "audiblez-mlx"
 version = "0.5.0"
-description = "Generate audiobooks from e-books on Apple Silicon, using Kokoro via MLX"
+description = "Generate audiobooks from e-books, using Kokoro on torch (MLX optional, Apple Silicon only)"
 authors = [
     { name = "Claudio Santini", email = "hireclaudio@gmail.com" }
 ]
@@ -18,14 +18,21 @@ dependencies = [
     # are simplified-keyed. Pure Python, no build step. See audiblez/chinese.py.
     "opencc-python-reimplemented (>=0.1.7,<0.2.0)",
     "tabulate (>=0.9.0,<0.10.0)",
-    "mlx-audio (>=0.5.0) ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # Kokoro on torch is the default engine: portable, runs on any CPU (and any CUDA GPU
+    # via --cuda). Pulls in torch (~2GB). The alternative MLX engine is an opt-in extra.
+    "kokoro (==0.9.4)",
 ]
 
 [project.optional-dependencies]
-# The portable fallback: Kokoro on torch, for non-Apple machines or A/B comparison.
-# Pulls in torch (~2GB), which is why it is not installed by default here.
+# Apple Silicon only: Kokoro through MLX on the Apple GPU, ~3.8x faster than torch but
+# historically linked to kernel panics on some machines, which is why it is no longer the
+# default. Opt in explicitly when you want the speed-up.
+mlx = [
+    "mlx-audio (>=0.5.0) ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+# Legacy no-op alias so `pip install ".[torch]"` still works for old instructions; the
+# torch engine is now part of the core dependency set.
 torch = [
-    "kokoro (==0.9.4)",
 ]
 # Microsoft Edge's online TTS: high-quality neural voices (incl. real Cantonese and
 # native traditional-script reading) with no model download. Requires network at

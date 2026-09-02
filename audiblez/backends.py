@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """TTS backends.
 
-Kokoro can run through torch (portable, works everywhere) or through MLX (Apple Silicon
-only, measured ~3.8x faster on an M5 Max). Both produce the same voices from the same
-weights, so the choice is purely about speed and platform.
+Kokoro runs through torch (portable, works everywhere, now the default engine) or through
+MLX (Apple Silicon only, measured ~3.8x faster on an M5 Max but historically linked to
+kernel panics on some machines). Both produce the same voices from the same weights, so
+the choice is purely about speed and platform.
 
 The MLX pipeline is adapted to Kokoro's own call signature, so `gen_audio_segments` --
 and everything downstream of it -- does not need to know which engine is running.
@@ -63,10 +64,10 @@ def mlx_available():
 
 
 def torch_available():
-    """True when the fallback torch backend is installed.
+    """True when the torch backend is installed.
 
-    This fork installs MLX by default; torch and kokoro are an optional extra, so their
-    absence is normal rather than an error.
+    Kokoro on torch is the default engine, so its absence is unusual; the accelerated
+    MLX backend is the optional extra in this fork.
     """
     try:
         import kokoro  # noqa: F401
@@ -78,8 +79,8 @@ def torch_available():
 def edge_available():
     """True when the edge-tts package is installed.
 
-    Edge is an optional extra like torch: it needs network at synthesis time, so its
-    absence is normal rather than an error.
+    Edge is an optional extra: it needs network at synthesis time, so its absence is
+    normal rather than an error.
     """
     try:
         import edge_tts  # noqa: F401
@@ -89,17 +90,22 @@ def edge_available():
 
 
 def resolve_backend(backend='auto'):
-    """Turn 'auto' into a concrete backend name."""
+    """Turn 'auto' into a concrete backend name.
+
+    'auto' now prefers the portable torch engine; MLX (Apple Silicon only) is used only
+    when torch is not installed. MLX is faster, but on some machines it is tied to kernel
+    panics, so torch is the safe default.
+    """
     if backend not in BACKENDS:
         raise ValueError(f"Unknown backend {backend!r}. Choose one of: {', '.join(BACKENDS)}")
     if backend != 'auto':
         return backend
-    if mlx_available():
-        return 'mlx'
     if torch_available():
         return 'torch'
-    # Nothing installed: name the one that suits this machine so the error tells the truth.
-    return 'mlx' if is_apple_silicon() else 'torch'
+    if mlx_available():
+        return 'mlx'
+    # Nothing installed: name the default engine so the error tells the truth.
+    return 'torch'
 
 
 def initial_chars_per_sec(backend, lang_code=None):
@@ -388,8 +394,8 @@ def get_pipeline(voice, lang_code=None, backend='auto', repo_id=None):
             'Add --backend edge to use it, or pick a Kokoro voice such as af_heart.')
     if resolved == 'mlx':
         if not mlx_available():
-            hint = ('Install it with: pip install mlx-audio "misaki[en]"' if is_apple_silicon()
-                    else 'It needs Apple Silicon; use --backend torch on this machine.')
+            hint = ('Install it with: pip install ".[mlx]"' if is_apple_silicon()
+                    else 'It needs Apple Silicon; use the default torch backend on this machine.')
             raise RuntimeError(f'The mlx backend is not available. {hint}')
         return MlxKokoroPipeline(lang_code, repo_id)
     if resolved == 'edge':
@@ -403,7 +409,7 @@ def get_pipeline(voice, lang_code=None, backend='auto', repo_id=None):
         return EdgePipeline(lang_code)
     if not torch_available():
         raise RuntimeError(
-            'The torch backend is not installed. This build ships MLX by default; '
-            'add the fallback with: pip install ".[torch]"')
+            'The torch backend is not installed. Install the default engine with: '
+            'pip install .   (or pip install -r requirements.txt)')
     from kokoro import KPipeline
     return KPipeline(lang_code=lang_code, repo_id=repo_id or DEFAULT_REPOS['torch'])

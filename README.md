@@ -1,20 +1,20 @@
-# audiblez-mlx: Generate audiobooks from e-books, on Apple Silicon
+# audiblez-mlx: Generate audiobooks from e-books (Kokoro on torch, MLX optional)
 
 ![Audiblez GUI on MacOSX](./imgs/mac.png)
 
-**This is a fork of [audiblez](https://github.com/santinic/audiblez) built for Apple Silicon and MLX.**
-
-Upstream audiblez runs Kokoro through PyTorch, which on a Mac means the CPU: the original
-README states "on my M2 MacBook Pro, on CPU, it takes about 1 hour... about 60 characters
-per second". This fork runs Kokoro through [MLX](https://github.com/Blaizzy/mlx-audio)
-instead, on the Apple GPU.
+**This is a fork of [audiblez](https://github.com/santinic/audiblez).** It runs Kokoro's
+text-to-speech through PyTorch by default (portable, works on any machine) and can speed it
+up with [MLX](https://github.com/Blaizzy/mlx-audio) on the Apple GPU. Upstream audiblez runs
+Kokoro purely on the CPU on a Mac, which is slow — about 60 characters per second on an M2.
 
 ### What this fork is for
 
-- **MLX is the default and the only required backend.** PyTorch is not installed unless you
-  ask for it, which removes a ~2GB dependency that did nothing useful on a Mac.
-- **Measured 906 characters/second on an M5 Max**, against 238 for the same model on torch —
-  3.8x. A 15.7-hour audiobook took **87 minutes on torch, and about 20 on MLX**.
+- **Kokoro on torch by default**, so a plain `pip install .` works everywhere. The
+  accelerator — MLX on the Apple GPU — is an opt-in extra (`pip install ".[mlx]"`, Apple
+  Silicon only). MLX is faster, but it has been linked to kernel panics on some machines, so
+  torch is the safe default.
+- **Measured 906 characters/second on an M5 Max on MLX**, against 238 for the same model on
+  torch — 3.8x. A 15.7-hour audiobook took **87 minutes on torch, and about 20 on MLX**.
 - **The time estimate is measured, not guessed.** Upstream hardcodes 50 chars/sec whenever
   CUDA is missing, so every Mac run mis-reported its ETA by roughly 4x.
 - **Better text extraction**, which matters more than speed for a listenable result: page
@@ -25,8 +25,6 @@ instead, on the Apple GPU.
   as 209 fragments that are really 18 chapters.
 
 Everything else — the voices, the GUI, the languages — is upstream's work and is unchanged.
-If you are not on Apple Silicon, use [the original project](https://github.com/santinic/audiblez);
-it is better suited to you and this fork offers you nothing.
 
 [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) is a text-to-speech model with just 82M
 params and very natural sounding output, released under the Apache licence and trained on
@@ -45,27 +43,27 @@ cd audiblez-mlx
 pip install .
 ```
 
-That installs the MLX backend. To also get the portable torch backend — for comparison, or
-on a non-Apple machine — add the extra (this is what pulls in PyTorch):
+That installs the default **torch** backend — Kokoro through PyTorch — which works on any
+machine. On Apple Silicon you can opt into the faster **MLX** backend, which runs on the
+Apple GPU (it pulls in `mlx-audio`):
 
 ```bash
-pip install ".[torch]"
+pip install ".[mlx]"      # Apple Silicon only — optional accelerator
 ```
 
-> On a non-Apple machine the `[torch]` extra is **required**, not optional: `mlx-audio` only
-> installs on Apple Silicon, so a plain `pip install .` elsewhere leaves you with no speech
-> engine at all.
+> The `[mlx]` extra only installs on Apple Silicon; it is ignored elsewhere, where the
+> default torch backend is all you have (and all you need). MLX is faster but has been
+> linked to kernel panics on some machines, which is why it is no longer the default.
 
-**On a PC / Linux**, the one-liner that installs everything you need (core + torch + edge)
-is:
+**On a PC / Linux**, the one-liner that installs everything you need (core + edge) is:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-That file mirrors `pyproject.toml` and includes the `[torch]` and `[edge]` extras, so
-`edge-tts` is installed too. (The `[gui]` extra is left out; add it with
-`pip install ".[gui]"` if you want the desktop UI.)
+That file mirrors `pyproject.toml`: it has the core dependencies (which include `kokoro`) and
+the `[edge]` extra, so `edge-tts` is installed too. (The `[gui]` extra is left out; add it
+with `pip install ".[gui]"` if you want the desktop UI.)
 
 To also get the **Edge backend** — Microsoft's online neural voices, including real
 Cantonese and native traditional-script reading — add the extra:
@@ -137,8 +135,9 @@ Then you can run the GUI with:
 audiblez-ui
 ```
 
-The GUI shows which backend will actually run, and lets you pick one explicitly. The torch
-device selector is greyed out when MLX is in use, since it has no effect there.
+The GUI shows which backend will actually run, and lets you pick one explicitly. torch is
+the default; the torch device selector is greyed out only when MLX is selected, since it has
+no effect there.
 
 ## Sleep during a long run
 
@@ -153,14 +152,13 @@ be taken, the run prints a warning and carries on.
 
 ## Windows and Linux
 
-This fork targets Apple Silicon. Linux is covered by one CI job that installs the
-`[torch]` extra and converts a book end to end, so the fallback is known to work there, but
-it is not a platform this fork optimises for. Windows is not tested at all.
+This fork targets Apple Silicon. Linux is covered by one CI job that installs the default
+torch backend and converts a book end to end, so it is known to work there, but it is not a
+platform this fork optimises for. Windows is not tested at all.
 
-The torch backend is how you run on either — `pip install ".[torch]"` and pass
-`--backend torch` — but if that is your platform you want
-[the upstream project](https://github.com/santinic/audiblez) instead, which supports it
-properly and has CI across all three.
+The default torch backend is what runs on either — `pip install .` — but if that is your
+platform you want [the upstream project](https://github.com/santinic/audiblez) instead,
+which supports it properly and has CI across all three.
 
 ## Speed
 
@@ -265,13 +263,14 @@ audiblez book.epub -v zh-HK-HiuMaanNeural --backend edge
 
 ## Choosing a backend
 
-MLX is used automatically on Apple Silicon. Pick an engine explicitly with `--backend`:
+The torch backend is the default and is used automatically. Pick an engine explicitly with
+`--backend`:
 
 ```
-audiblez book.epub -v af_sky --backend mlx     # force MLX (Apple Silicon only)
-audiblez book.epub -v af_sky --backend torch   # force Torch (needs the [torch] extra)
+audiblez book.epub -v af_sky --backend torch   # default: Kokoro through PyTorch
+audiblez book.epub -v af_sky --backend mlx     # force MLX (Apple Silicon only, needs ".[mlx]")
 audiblez book.epub -v zh-TW-HsiaoChenNeural --backend edge   # Microsoft's online TTS (needs the [edge] extra + network)
-audiblez book.epub -v af_sky --backend auto    # default: MLX when available, else Torch
+audiblez book.epub -v af_sky --backend auto    # default: torch when installed, else MLX
 ```
 
 MLX runs the model in `bf16` where Torch runs `fp32`. Output is equivalent in duration
@@ -355,15 +354,14 @@ options:
                         audiobook
   -s SPEED, --speed SPEED
                         Set speed from 0.5 to 2.0
-  -c, --cuda            Use an Nvidia GPU via Torch. Ignored on Apple Silicon,
-                        where the mlx backend already runs on the GPU
+  -c, --cuda            Use an Nvidia GPU via Torch. Ignored on Apple Silicon
   -o FOLDER, --output FOLDER
                         Output folder for the audiobook and intermediate files
                         (default: audiobooks/, created if missing)
   -b {auto,torch,mlx,edge}, --backend {auto,torch,mlx,edge}
-                        TTS engine: mlx is Apple-Silicon only and faster, auto
-                        picks it when available; edge is Microsoft's online TTS
-                        (needs network)
+                        TTS engine: torch is the default (portable); auto picks it
+                        when installed; mlx is Apple-Silicon only and faster; edge
+                        is Microsoft's online TTS (needs network)
   --lang CODE           Language code: Kokoro (a, b, e, f, h, i, j, p, z) or an
                         Edge locale (en-US, zh-TW, zh-HK, ...). Defaults to the
                         first letter of the voice name, or the locale for an Edge

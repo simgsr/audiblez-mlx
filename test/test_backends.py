@@ -55,8 +55,14 @@ class ResolveBackendTest(unittest.TestCase):
             resolve_backend('festival')
         self.assertIn('festival', str(ctx.exception))
 
-    def test_auto_prefers_mlx_when_available(self):
-        with mock.patch.object(backends, 'mlx_available', return_value=True):
+    def test_auto_prefers_torch_when_both_are_available(self):
+        with mock.patch.object(backends, 'mlx_available', return_value=True), \
+             mock.patch.object(backends, 'torch_available', return_value=True):
+            self.assertEqual(resolve_backend('auto'), 'torch')
+
+    def test_auto_falls_back_to_mlx_only_when_torch_is_missing(self):
+        with mock.patch.object(backends, 'mlx_available', return_value=True), \
+             mock.patch.object(backends, 'torch_available', return_value=False):
             self.assertEqual(resolve_backend('auto'), 'mlx')
 
     def test_mlx_unavailable_off_apple_silicon(self):
@@ -73,12 +79,12 @@ class AutoBackendFallbackTest(unittest.TestCase):
              mock.patch.object(backends, 'torch_available', return_value=True):
             self.assertEqual(resolve_backend('auto'), 'torch')
 
-    def test_auto_names_mlx_on_apple_silicon_when_nothing_is_installed(self):
-        # The error should point at the backend that suits the machine, not the other one.
+    def test_auto_names_the_default_torch_engine_when_nothing_is_installed(self):
+        # With neither engine installed, 'auto' reports the default engine so the error
+        # points the user at what they should install, regardless of machine.
         with mock.patch.object(backends, 'mlx_available', return_value=False), \
-             mock.patch.object(backends, 'torch_available', return_value=False), \
-             mock.patch.object(backends, 'is_apple_silicon', return_value=True):
-            self.assertEqual(resolve_backend('auto'), 'mlx')
+             mock.patch.object(backends, 'torch_available', return_value=False):
+            self.assertEqual(resolve_backend('auto'), 'torch')
 
     def test_auto_names_torch_elsewhere_when_nothing_is_installed(self):
         with mock.patch.object(backends, 'mlx_available', return_value=False), \
@@ -86,11 +92,11 @@ class AutoBackendFallbackTest(unittest.TestCase):
              mock.patch.object(backends, 'is_apple_silicon', return_value=False):
             self.assertEqual(resolve_backend('auto'), 'torch')
 
-    def test_torch_backend_without_kokoro_explains_the_extra(self):
+    def test_torch_backend_without_kokoro_explains_the_default_install(self):
         with mock.patch.object(backends, 'torch_available', return_value=False):
             with self.assertRaises(RuntimeError) as ctx:
                 get_pipeline('af_sky', backend='torch')
-        self.assertIn('.[torch]', str(ctx.exception))
+        self.assertIn('pip install .', str(ctx.exception))
 
     def test_mlx_requested_off_apple_silicon_says_so(self):
         with mock.patch.object(backends, 'mlx_available', return_value=False), \
@@ -166,7 +172,7 @@ class GetPipelineTest(unittest.TestCase):
              mock.patch.object(backends, 'is_apple_silicon', return_value=True):
             with self.assertRaises(RuntimeError) as ctx:
                 get_pipeline('af_sky', backend='mlx')
-        self.assertIn('pip install mlx-audio', str(ctx.exception))
+        self.assertIn('.[mlx]', str(ctx.exception))
 
     def test_lang_code_defaults_to_first_letter_of_voice(self):
         with mock.patch.object(backends, 'mlx_available', return_value=True):

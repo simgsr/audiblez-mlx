@@ -381,10 +381,10 @@ class MainWindow(wx.Frame):
         sizer.Add(backend_dropdown, pos=(0, 1), flag=wx.ALL, border=border)
 
         resolved = resolve_backend('auto')
-        if mlx_available():
-            backend_note = f'MLX available — "auto" will use it (faster)'
-        elif platform.system() == 'Darwin' and platform.machine() == 'arm64':
-            backend_note = 'Install audiblez[mlx] for a faster Apple Silicon backend'
+        if torch_available():
+            backend_note = f'"auto" uses the torch backend (portable)'
+        elif mlx_available():
+            backend_note = 'torch not installed — "auto" will use mlx'
         else:
             backend_note = f'"auto" will use {resolved}'
         self.backend_note = wx.StaticText(panel, label=backend_note)
