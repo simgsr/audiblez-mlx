@@ -6,8 +6,9 @@ env:
   TEST_EPUB_URL: https://github.com/daisy/epub-accessibility-tests/releases/download/fundamental-2.0/Fundamental-Accessibility-Tests-Basic-Functionality-v2.0.0.epub
 
 jobs:
-  # The platform this fork exists for: Apple Silicon, MLX backend, no torch installed.
-  macos-mlx:
+  # The platform this fork exists for: Apple Silicon. The default install is the portable
+  # torch backend; MLX is an opt-in accelerator that must also install cleanly here.
+  macos-torch-default:
     runs-on: macos-14  # arm64
     # A normal run of this job is ~6 minutes. Without a timeout the default is 6 hours, so a
     # package mirror that stalls instead of failing keeps the job "in progress" all day.
@@ -29,14 +30,23 @@ jobs:
         run: pip install .
       - name: Check it runs as a script
         run: audiblez --help
-      - name: Confirm MLX is the resolved backend and torch is absent
+      - name: Confirm torch is the default backend and MLX is opt-in
         run: |
           python - <<'PY'
           from audiblez.backends import mlx_available, torch_available, resolve_backend
-          assert mlx_available(), 'mlx-audio should install by default on Apple Silicon'
-          assert not torch_available(), 'torch must not be pulled in by the base install'
-          assert resolve_backend('auto') == 'mlx'
-          print('backend: mlx, torch absent - as intended')
+          assert torch_available(), 'kokoro/torch should install by default'
+          assert not mlx_available(), 'mlx-audio must not be pulled in by the base install'
+          assert resolve_backend('auto') == 'torch'
+          print('backend: torch, mlx absent - as intended')
+          PY
+      - name: Install the MLX accelerator and confirm it stays opt-in
+        run: |
+          pip install ".[mlx]"
+          python - <<'PY'
+          from audiblez.backends import mlx_available, resolve_backend
+          assert mlx_available(), 'the [mlx] extra should make mlx available on Apple Silicon'
+          assert resolve_backend('auto') == 'torch', 'auto still prefers torch when both are installed'
+          print('mlx installed; auto still prefers torch - as intended')
           PY
       - name: Unit tests
         run: |
@@ -46,6 +56,7 @@ jobs:
           python test/test_chinese.py
           python test/test_power.py
           python test/test_imports.py
+          python test/test_cli.py
       - name: Download test epub
         run: curl -sSL -o book.epub "$TEST_EPUB_URL"
       - name: Create audiobook
@@ -55,7 +66,9 @@ jobs:
           ls -lah audiobooks/book.m4b
           test -s audiobooks/book.m4b
 
-  # The portable fallback still has to work: no MLX wheel here, so [torch] is required.
+  # The portable torch backend must work off Apple Silicon too. `[torch]` is a legacy no-op
+  # alias kept so old install instructions still work; the torch engine is part of the core
+  # dependency set, so a plain `pip install .` is what this job really exercises.
   linux-torch-fallback:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -122,6 +135,7 @@ jobs:
           python test/test_chinese.py
           python test/test_power.py
           python test/test_imports.py
+          python test/test_cli.py
       - name: Download test epub
         run: curl -sSL -o book.epub "$TEST_EPUB_URL"
       - name: Create audiobook
