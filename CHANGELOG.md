@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-Everything below has landed since the `v0.5.0` tag. Note the breaking change: Qwen3-TTS was
-added and then removed again within this range, so it never appeared in a tagged release.
+## 0.6.0
+
+Note the breaking change: Qwen3-TTS was added and then removed again within this range, so it
+never appeared in a tagged release.
 
 ### Added
 

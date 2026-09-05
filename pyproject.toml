@@ -1,6 +1,6 @@
 [project]
 name = "audiblez-mlx"
-version = "0.5.0"
+version = "0.6.0"
 description = "Generate audiobooks from e-books, using Kokoro on torch (MLX optional, Apple Silicon only)"
 authors = [
     { name = "Claudio Santini", email = "hireclaudio@gmail.com" }
