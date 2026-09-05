@@ -52,6 +52,11 @@ added and then removed again within this range, so it never appeared in a tagged
 - The time estimate is seeded per language as well as per backend — a CJK character carries
   far more phonemes than a Latin one, and the first ETA for a Chinese book was optimistic by
   4-6x without it.
+- **The `.m4b` is now encoded once instead of twice.** The chapter `.wav`s are concatenated
+  into a lossless PCM intermediate and the single AAC encode happens at the end, so the audio
+  no longer passes through a discarded 192k AAC generation on its way to 64k.
+- The torch-CPU ETA seed now matches the measured ~238 chars/sec instead of upstream's 50,
+  which mis-reported the first ETA by roughly 4x.
 
 ### Fixed
 
@@ -75,11 +80,23 @@ added and then removed again within this range, so it never appeared in a tagged
   fixed, and the column scrolls rather than clipping when the screen is too short for it. A
   long book title or output path no longer stretches the window, and the chapter table's
   columns share out the width they actually have.
+- **The macOS CI job asserted the pre-torch-default behavior** — MLX installed by default,
+  torch absent — and failed on every run after torch became the default engine. It now
+  verifies that `pip install .` gives torch with no MLX, that `pip install ".[mlx]"` makes MLX
+  available while `auto` still prefers torch, and runs the end-to-end conversion on the
+  default backend.
+- **Three test files ran nothing when invoked directly** (`test_cli.py`,
+  `test_find_chapters.py`, `test_main.py` had no `unittest.main()` block and exited 0 without
+  running a single test). They now have entry points, skip cleanly when their gitignored
+  `.epub` fixtures or the network are absent, and `test_cli.py`'s backend-check tests run in
+  CI.
 
 ### Removed
 
 - **Qwen3-TTS and the model registry it introduced** (breaking, but never released: it was
   added and removed within this range).
+- Dead code: `unmark`/`unmark_element` (they referenced an undefined `Markdown` and nothing
+  called them), a shadowed `_SPEAKABLE_RE`, unused imports, and commented-out UI blocks.
 
 ## 0.5.0 — first release of the `audiblez_mlx` fork
 
