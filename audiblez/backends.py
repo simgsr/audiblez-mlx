@@ -31,7 +31,7 @@ DEFAULT_REPOS = {
 CHARS_PER_SEC_GUESS = {
     'mlx': 900,        # measured ~906 on an M5 Max
     'torch_cuda': 500,
-    'torch_cpu': 50,
+    'torch_cpu': 238,  # measured on an M5 Max; upstream's 50 mis-reported the ETA by ~4x
     'edge': 150,       # network-bound; conservative, recalibrates within the first chapter
 }
 
