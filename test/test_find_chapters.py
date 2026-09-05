@@ -1,9 +1,16 @@
 import unittest
+from pathlib import Path
+
 from ebooklib import epub
 
 from audiblez.core import find_document_chapters_and_extract_texts, find_good_chapters
 
+# The fixture books are gitignored (see .gitignore: *.epub), so they are not in the repo;
+# the whole class skips when they are absent rather than failing a fresh clone.
+EPUB_DIR = Path(__file__).resolve().parent.parent / 'epub'
 
+
+@unittest.skipUnless(EPUB_DIR.exists(), '../epub/ fixture books not present')
 class FindChaptersTest(unittest.TestCase):
     def base(self, file, expected_chapter_names):
         book = epub.read_epub(file)
@@ -13,7 +20,7 @@ class FindChaptersTest(unittest.TestCase):
         self.assertEqual(chapter_names, expected_chapter_names)
 
     def test_gene(self):
-        self.base('../epub/gene.epub', [
+        self.base(str(EPUB_DIR / 'gene.epub'), [
             # '000_ACover.xhtml',  # 81
             # '002_FM_halftitle.xhtml',  # 2302
             # '003_FM_titlepage.xhtml',  # 550
@@ -45,7 +52,7 @@ class FindChaptersTest(unittest.TestCase):
         ])
 
     def test_spawn_of_dagon(self):
-        self.base('../epub/dagon.epub', [
+        self.base(str(EPUB_DIR / 'dagon.epub'), [
             # 'bk01-toc.xhtml',  # 276
             # 'cover.xhtml',  # 76
             # 'index.xhtml',  # 1399
@@ -53,7 +60,7 @@ class FindChaptersTest(unittest.TestCase):
         ])
 
     def test_solenoid(self):
-        self.base('../epub/solenoid.epub', [
+        self.base(str(EPUB_DIR / 'solenoid.epub'), [
             'xhtml/part1.xhtml',
             'xhtml/part2.xhtml',
             'xhtml/part3.xhtml',
@@ -61,7 +68,7 @@ class FindChaptersTest(unittest.TestCase):
         ])
 
     def test_lewis_innocents(self):
-        self.base('../epub/lewis.epub', [
+        self.base(str(EPUB_DIR / 'lewis.epub'), [
             # 'bk01-toc.xhtml',  # 1603
             # 'cover.xhtml',  # 72
             # 'index.xhtml',  # 1554
@@ -87,7 +94,7 @@ class FindChaptersTest(unittest.TestCase):
         ])
 
     def test_poe(self):
-        self.base('../epub/poe.epub', [
+        self.base(str(EPUB_DIR / 'poe.epub'), [
             # 'bk01-toc.xhtml',  # 332
             # 'cover.xhtml',  # 72
             # 'index.xhtml',  # 1454
@@ -95,7 +102,7 @@ class FindChaptersTest(unittest.TestCase):
         ])
 
     def test_chalmers(self):
-        self.base('../epub/chalmers.epub', [
+        self.base(str(EPUB_DIR / 'chalmers.epub'), [
             # 'nav.xhtml',  # 38422
             # 'Text/00_Cover.xhtml',  # 175
             # 'Text/01_Also.xhtml',  # 359
@@ -143,7 +150,7 @@ class FindChaptersTest(unittest.TestCase):
 
     def test_dracula_default_all_chapters(self):
         # If it cannot detect chapters, default to all available documents.
-        self.base('../epub/dracula.epub', [
+        self.base(str(EPUB_DIR / 'dracula.epub'), [
             '2903486949112998543_345-h-0.htm.xhtml',  # 2087
             '2903486949112998543_345-h-1.htm.xhtml',  # 3997
             '2903486949112998543_345-h-2.htm.xhtml',  # 561
@@ -179,3 +186,7 @@ class FindChaptersTest(unittest.TestCase):
             'toc.xhtml',  # 4900
             # 'wrap0000.xhtml',  # 374
         ])
+
+
+if __name__ == '__main__':
+    unittest.main()

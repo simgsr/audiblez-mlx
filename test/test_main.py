@@ -1,4 +1,5 @@
 import os
+import socket
 import subprocess
 import unittest
 from pathlib import Path
@@ -12,6 +13,16 @@ from audiblez.core import main, find_document_chapters_and_extract_texts
 # EspeakWrapper.set_library('/opt/homebrew/Cellar/espeak-ng/1.52.0/lib/libespeak-ng.1.dylib')
 
 
+def _network_available():
+    """The integration tests download books from the internet; skip cleanly offline."""
+    try:
+        socket.create_connection(('www.gutenberg.org', 443), timeout=5).close()
+        return True
+    except OSError:
+        return False
+
+
+@unittest.skipUnless(_network_available(), 'network required to download test books')
 class MainTest(unittest.TestCase):
     def base(self, name, url='', **kwargs):
         if not Path(f'{name}.epub').exists():
@@ -64,3 +75,7 @@ class MainTest(unittest.TestCase):
                 'essa appiccicata, ma anche lontani nel tempo, nello spazio e nel ricordo, con mobili scintillanti e '
                 'strani, con orologi a pendolo di noce e candelabri con piccole foglie di ottone, ma questa volta la '
                 'mia casa buia, dalle cui finestre nevicava all’impazzata, mi è parsa sconfinata.')
+
+
+if __name__ == '__main__':
+    unittest.main()

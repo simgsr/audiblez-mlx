@@ -6,10 +6,16 @@ from unittest import mock
 
 from audiblez.cli import check_backend_installed
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+# The epub fixture is gitignored (see .gitignore: *.epub), so it is not in the repo; the
+# end-to-end CLI tests skip when it is absent rather than failing a fresh clone.
+EPUB_FIXTURE = REPO_ROOT / 'epub' / 'mini.epub'
 
+
+@unittest.skipUnless(EPUB_FIXTURE.exists(), 'epub/mini.epub fixture not present')
 class CliTest(unittest.TestCase):
     def cli(self, args):
-        cmd = f'cd .. && python -m audiblez.cli {args}'
+        cmd = f'cd "{REPO_ROOT}" && python -m audiblez.cli {args}'
         return os.popen(cmd).read()
 
     def test_help(self):
@@ -23,15 +29,15 @@ class CliTest(unittest.TestCase):
         out = self.cli('epub/mini.epub')
         self.assertIn('Found cover image', out)
         self.assertIn('Creating M4B file', out)
-        self.assertTrue(Path('../mini.m4b').exists())
-        self.assertTrue(Path('../mini.m4b').stat().st_size > 256 * 1024)
+        self.assertTrue((REPO_ROOT / 'mini.m4b').exists())
+        self.assertTrue((REPO_ROOT / 'mini.m4b').stat().st_size > 256 * 1024)
 
     def test_epub_voice_and_output_folder(self):
         out = self.cli('epub/mini.epub -v af_sky -o test/prova')
         self.assertIn('Found cover image', out)
         self.assertIn('Creating M4B file', out)
-        self.assertTrue(Path('./prova/mini.m4b').exists())
-        self.assertTrue(Path('./prova/mini.m4b').stat().st_size > 256 * 1024)
+        self.assertTrue((REPO_ROOT / 'test' / 'prova' / 'mini.m4b').exists())
+        self.assertTrue((REPO_ROOT / 'test' / 'prova' / 'mini.m4b').stat().st_size > 256 * 1024)
 
     @unittest.skip('Not implemented yet')
     def test_md(self):
@@ -100,3 +106,7 @@ class CheckBackendInstalledTest(unittest.TestCase):
     def test_auto_only_edge_installed_fails(self):
         # auto never picks edge, so it must tell the user to pass --backend edge.
         self.assertEqual(self.run_check('auto', edge=True), 1)
+
+
+if __name__ == '__main__':
+    unittest.main()
