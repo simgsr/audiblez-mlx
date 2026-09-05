@@ -18,7 +18,6 @@ import shutil
 import subprocess
 import platform
 import re
-from io import StringIO
 from types import SimpleNamespace
 from tabulate import tabulate
 from pathlib import Path
@@ -1037,24 +1036,3 @@ def create_index_file(title, creator, chapter_mp3_files, output_folder, chapter_
             f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle={chapter_title}\n\n")
             i += 1
             start = end
-
-
-def unmark_element(element, stream=None):
-    """auxiliarry function to unmark markdown text"""
-    if stream is None:
-        stream = StringIO()
-    if element.text:
-        stream.write(element.text)
-    for sub in element:
-        unmark_element(sub, stream)
-    if element.tail:
-        stream.write(element.tail)
-    return stream.getvalue()
-
-
-def unmark(text):
-    """Unmark markdown text"""
-    Markdown.output_formats["plain"] = unmark_element  # patching Markdown
-    __md = Markdown(output_format="plain")
-    __md.stripTopLevelTags = False
-    return __md.convert(text)

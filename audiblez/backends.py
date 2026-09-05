@@ -12,7 +12,6 @@ and everything downstream of it -- does not need to know which engine is running
 import os
 import platform
 import re
-import subprocess
 import threading
 import time
 from glob import glob
@@ -26,9 +25,6 @@ DEFAULT_REPOS = {
     'torch': 'hexgrad/Kokoro-82M',
     'mlx': 'mlx-community/Kokoro-82M-bf16',
 }
-
-# Any non-whitespace character means there is something to narrate.
-_SPEAKABLE_RE = re.compile(r'\S')
 
 # Starting guesses for the time estimate, in characters of text per second. These only seed
 # the estimate: it is recalibrated from real throughput once synthesis is under way.

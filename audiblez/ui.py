@@ -15,7 +15,6 @@ from wx.lib.newevent import NewEvent
 from wx.lib.scrolledpanel import ScrolledPanel
 from PIL import Image
 from tempfile import NamedTemporaryFile
-from pathlib import Path
 
 from audiblez import DEFAULT_OUTPUT_FOLDER
 from audiblez.backends import edge_available, mlx_available, resolve_backend, torch_available
@@ -129,7 +128,6 @@ class MainWindow(wx.Frame):
         self.SetMenuBar(menubar)
 
     def on_core_started(self, event):
-        print('CORE_STARTED')
         self.progress_bar_label.Show()
         self.progress_bar.Show()
         self.progress_bar.SetValue(0)
@@ -139,16 +137,13 @@ class MainWindow(wx.Frame):
         self.synth_panel.Layout()
 
     def on_core_chapter_started(self, event):
-        # print('CORE_CHAPTER_STARTED', event.chapter_index)
         self.set_table_chapter_status(event.chapter_index, "⏳ In Progress")
 
     def on_core_chapter_finished(self, event):
-        # print('CORE_CHAPTER_FINISHED', event.chapter_index)
         self.set_table_chapter_status(event.chapter_index, "✅ Done")
         self.start_button.Show()
 
     def on_core_progress(self, event):
-        # print('CORE_PROGRESS', event.progress)
         self.progress_bar.SetValue(event.stats.progress)
         self.progress_bar_label.SetLabel(f"Synthesis Progress: {event.stats.progress}%")
         self.eta_label.SetLabel(f"Estimated Time Remaining: {event.stats.eta}")
@@ -211,21 +206,6 @@ class MainWindow(wx.Frame):
         open_epub_button.Bind(wx.EVT_BUTTON, self.on_open)
         top_sizer.Add(open_epub_button, 0, wx.ALL, 5)
 
-        # Open Markdown .md
-        # open_md_button = wx.Button(top_panel, label="📁 Open Markdown (.md)")
-        # open_md_button.Bind(wx.EVT_BUTTON, self.on_open)
-        # top_sizer.Add(open_md_button, 0, wx.ALL, 5)
-
-        # Open .txt
-        # open_txt_button = wx.Button(top_panel, label="📁 Open .txt")
-        # open_txt_button.Bind(wx.EVT_BUTTON, self.on_open)
-        # top_sizer.Add(open_txt_button, 0, wx.ALL, 5)
-
-        # Open PDF
-        # open_pdf_button = wx.Button(top_panel, label="📁 Open PDF")
-        # open_pdf_button.Bind(wx.EVT_BUTTON, self.on_open)
-        # top_sizer.Add(open_pdf_button, 0, wx.ALL, 5)
-
         # About button
         help_button = wx.Button(top_panel, label="ℹ️ About")
         help_button.Bind(wx.EVT_BUTTON, lambda event: self.about_dialog())
@@ -234,8 +214,6 @@ class MainWindow(wx.Frame):
         self.main_sizer = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(self.main_sizer)
 
-        # self.splitter = wx.SplitterWindow(self, -1)
-        # self.splitter.SetSashGravity(0.9)
         self.splitter = wx.Panel(self)
         self.splitter_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.splitter.SetSizer(self.splitter_sizer)
@@ -468,7 +446,6 @@ class MainWindow(wx.Frame):
         self.rebuild_languages()
 
     def create_synthesis_panel(self):
-        # Think and identify layout issue with the folling code
         panel_box = wx.Panel(self.right_panel, style=wx.SUNKEN_BORDER)
         panel_box_sizer = wx.StaticBoxSizer(wx.VERTICAL, panel_box, "Audiobook Generation Status")
         panel_box.SetSizer(panel_box_sizer)
@@ -483,12 +460,6 @@ class MainWindow(wx.Frame):
         self.start_button = wx.Button(panel, label="🚀 Start Audiobook Synthesis")
         self.start_button.Bind(wx.EVT_BUTTON, self.on_start)
         sizer.Add(self.start_button, 0, wx.ALL, 5)
-
-        # Add Stop button
-        # self.stop_button = wx.Button(panel, label="⏹️ Stop Synthesis")
-        # self.stop_button.Bind(wx.EVT_BUTTON, self.on_stop)
-        # sizer.Add(self.stop_button, 0, wx.ALL, 5)
-        # self.stop_button.Hide()
 
         # Add Progress Bar label:
         self.progress_bar_label = wx.StaticText(panel, label="Synthesis Progress:")
@@ -792,7 +763,6 @@ class MainWindow(wx.Frame):
                 self.set_table_chapter_status(chapter_index, "Planned")
                 self.table.SetItem(chapter_index, 0, '✔️')
 
-        # self.stop_button.Show()
         backend = self.selected_backend
         print('Starting Audiobook Synthesis',
               dict(file_path=file_path, voice=voice, pick_manually=False, speed=speed, backend=backend))
