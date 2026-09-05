@@ -924,7 +924,7 @@ def find_aac_encoder():
     """Pick the best AAC encoder this ffmpeg actually has.
 
     libfdk_aac is non-free, so most distribution builds (including Homebrew's default) leave it
-    out; hardcoding it makes the concat step fail and no m4b is ever produced.
+    out; hardcoding it makes the final m4b encode fail and no m4b is ever produced.
     """
     try:
         encoders = subprocess.run(['ffmpeg', '-hide_banner', '-encoders'],
@@ -946,14 +946,14 @@ def concat_wavs_with_ffmpeg(chapter_files, output_folder, filename):
             # A literal ' is escaped by closing, escaping, and reopening the quote.
             path = str(Path(wav_file).resolve()).replace("'", r"'\''")
             f.write(f"file '{path}'\n")
-    concat_file_path = Path(output_folder) / filename.replace('.epub', '.tmp.mp4')
-    encoder = find_aac_encoder()
-    print(f'Concatenating {len(chapter_files)} chapters with ffmpeg using the {encoder} encoder...')
+    # Lossless intermediate: the chapters are concatenated as PCM and the single lossy
+    # encode to AAC happens once, in create_m4b. Encoding to AAC here too would double-
+    # encode the audio (192k -> 64k) and throw away the first generation.
+    concat_file_path = Path(output_folder) / filename.replace('.epub', '.tmp.wav')
+    print(f'Concatenating {len(chapter_files)} chapters into a lossless intermediate...')
     proc = subprocess.run([
         'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', wav_list_txt,
-        # '-c', 'copy',
-        '-c:a',  encoder,
-        '-b:a',  '192k',
+        '-c:a', 'pcm_s16le',
         concat_file_path])
     Path(wav_list_txt).unlink()
     if proc.returncode != 0 or not Path(concat_file_path).exists():
@@ -981,16 +981,17 @@ def create_m4b(chapter_files, filename, cover_image, output_folder):
     else:
         cover_image_args = []
 
+    encoder = find_aac_encoder()
     proc = subprocess.run([
         'ffmpeg',
         '-y',  # Overwrite output
-        
+
         '-i', f'{concat_file_path}',  # Input audio
         '-i', f'{chapters_txt_path}',  # Input chapters
         *cover_image_args,  # Cover image (if provided)
 
         '-map', '0:a',  # Map audio
-        '-c:a', 'aac',  # Convert to AAC
+        '-c:a', encoder,  # Convert to AAC
         '-b:a', '64k',  # Reduce bitrate for smaller size
 
         '-map_metadata', '1', # Map metadata

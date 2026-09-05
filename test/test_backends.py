@@ -665,6 +665,35 @@ class ConcatListTest(unittest.TestCase):
         self.assertIn(r"'\''", content)
 
 
+class CreateM4bEncoderTest(unittest.TestCase):
+    """The single lossy encode in create_m4b uses the best AAC encoder ffmpeg has.
+
+    The concat step now writes a lossless PCM intermediate, so the only AAC encode is the
+    final one; it must pick the encoder via find_aac_encoder rather than hardcoding 'aac'.
+    """
+
+    def test_uses_the_found_aac_encoder(self):
+        import tempfile
+        from pathlib import Path
+        from audiblez.core import create_m4b
+        with tempfile.TemporaryDirectory() as tmp:
+            concat = Path(tmp) / 'book.tmp.wav'
+            concat.write_bytes(b'x')
+            calls = []
+
+            def fake_run(cmd, *a, **k):
+                calls.append(cmd)
+                return mock.Mock(returncode=0)
+
+            with mock.patch('audiblez.core.concat_wavs_with_ffmpeg', return_value=concat), \
+                 mock.patch('audiblez.core.find_aac_encoder', return_value='libfdk_aac'), \
+                 mock.patch('audiblez.core.subprocess.run', side_effect=fake_run):
+                create_m4b([], 'book.epub', b'', tmp)
+            m4b_cmd = calls[-1]
+            self.assertIn('libfdk_aac', m4b_cmd)
+            self.assertIn('64k', m4b_cmd)
+
+
 class GenTextLangCodeTest(unittest.TestCase):
     """gen_text has to resolve the language the same way main() does.
 
